@@ -76,6 +76,7 @@ VECTOR_HYDRATION_BATCH_SIZE = 250
 RERANK_POOL_CHUNK_FANOUT = 4
 FUSION_BONUS = 0.3
 FUSION_FORMULA_VERSION = "max+0.3*min/v1"
+RELAXED_FUSION_FORMULA_VERSION = "relaxed-semantic-anchor/v1"
 FTS_GATE_THRESHOLD = 0.0
 TOP_CHUNKS_PER_RESULT = 5
 SMALL_NOTE_CONTENT_LIMIT = 2000
@@ -302,10 +303,15 @@ class Fusion:
         return [replace(self.rows_by_key[key], score=score) for key, score in entries]
 
 
-def fuse(fts_rows: Sequence[SearchIndexRow], vector_rows: Sequence[SearchIndexRow]) -> Fusion:
-    """Fuse with ``max(vec, fts) + FUSION_BONUS * min(vec, fts)``.
+def fuse(
+    fts_rows: Sequence[SearchIndexRow],
+    vector_rows: Sequence[SearchIndexRow],
+    *,
+    relaxed_fts: bool = False,
+) -> Fusion:
+    """Fuse strict matches as dominant signals and relaxed matches as lexical bonuses.
 
-    The formula preserves the dominant signal and rewards dual-source agreement. A bare
+    Strict fusion preserves the dominant signal and rewards dual-source agreement. A bare
     row id collides across row types (independent id sequences), so fusion keys on
     (type, id) or distinct rows would merge (#982).
     """
@@ -346,7 +352,14 @@ def fuse(fts_rows: Sequence[SearchIndexRow], vector_rows: Sequence[SearchIndexRo
     for key in fts_scores.keys() | vector_scores.keys():
         v = vector_scores.get(key, 0.0)
         f = fts_scores.get(key, 0.0)
-        fused_scores[key] = max(v, f) + FUSION_BONUS * min(v, f)
+        # Trigger: strict FTS failed and only the any-word retry found lexical hits.
+        # Why: normalizing an incidental word match to 1.0 can displace a strong
+        # semantic answer. Only strict FTS matches deserve the dominant-signal rule.
+        # Outcome: relaxed FTS boosts vector matches; lexical-only hits get a bounded vote.
+        if relaxed_fts:
+            fused_scores[key] = v * (1 + FUSION_BONUS * f) if v > 0 else FUSION_BONUS * f
+        else:
+            fused_scores[key] = max(v, f) + FUSION_BONUS * min(v, f)
 
     ranked = sorted(fused_scores.items(), key=lambda item: (-item[1], item[0]))
     return Fusion(
@@ -1396,9 +1409,10 @@ class SemanticSearch:
         query_start = time.perf_counter()
         candidate_limit = self._candidate_limit(limit, offset, query_text)
         fts_start = time.perf_counter()
-        # allow_relaxed: question-form queries rarely AND-match, and a dead FTS
-        # branch silently degrades hybrid to vector-only ranking. Fusion plus
-        # bm25 keep relaxed lexical candidates from dominating precision.
+        # The retry status affects ranking even when the caller did not ask for a
+        # diagnostic trace. Keep this small FTS collector local to this invocation;
+        # no state is shared between concurrent or successive searches.
+        fts_trace = trace if trace is not None else SearchTraceCollector()
         with logfire.span("search.fts", candidate_limit=candidate_limit) as fts_span:
             fts_results = await self.fts.search(
                 self.scope,
@@ -1406,11 +1420,12 @@ class SemanticSearch:
                 limit=candidate_limit,
                 offset=0,
                 allow_relaxed=True,
-                trace=trace,
+                trace=fts_trace,
                 # Fusion reads scores; the returned rows' text is fetched afterwards.
                 with_text=False,
             )
             fts_span.set_attribute("result_count", len(fts_results))
+        relaxed_fts = fts_trace.fts is not None and fts_trace.fts.relaxed_fallback_used
         fts_ms = (time.perf_counter() - fts_start) * 1000
         vector_start = time.perf_counter()
         # Trigger: reranking owns a bounded candidate window shared by both legs.
@@ -1464,23 +1479,22 @@ class SemanticSearch:
         with logfire.span(
             "search.fusion", fts_count=len(fts_results), vector_count=len(vector_results)
         ) as fusion_span:
-            fusion = fuse(fts_results, vector_results)
+            fusion = fuse(fts_results, vector_results, relaxed_fts=relaxed_fts)
             fusion_span.set_attribute("result_count", len(fusion.ranked))
         fusion_ms = (time.perf_counter() - fusion_start) * 1000
         if trace is not None:
-            relaxed_fallback_used = (
-                trace.fts.relaxed_fallback_used if trace.fts is not None else False
-            )
             trace.fts = build_fts_page_stage(
                 [((row.type, row.id), row.score or 0.0) for row in fts_results],
                 normalized_scores=fusion.fts_scores,
                 entity_ids={(row.type, row.id): row.entity_id for row in fts_results},
                 fts_max_abs=fusion.fts_max,
-                relaxed_fallback_used=relaxed_fallback_used,
+                relaxed_fallback_used=relaxed_fts,
                 fts_ms=fts_ms,
             )
             trace.fusion = build_fusion_stage(
-                formula_version=FUSION_FORMULA_VERSION,
+                formula_version=(
+                    RELAXED_FUSION_FORMULA_VERSION if relaxed_fts else FUSION_FORMULA_VERSION
+                ),
                 bonus=FUSION_BONUS,
                 fts_scores=fusion.fts_scores,
                 fts_ranks=fusion.fts_ranks,
@@ -1505,7 +1519,9 @@ class SemanticSearch:
             # with the same documents, whatever window its depth asked for.
             fixed_limit = self._rerank_candidate_limit(rerank)
             prefix_vector_rows, prefix_bound = self._prefix_rows(window, fixed_limit, query, rerank)
-            prefix_fusion = fuse(fts_results[:fixed_limit], prefix_vector_rows)
+            prefix_fusion = fuse(
+                fts_results[:fixed_limit], prefix_vector_rows, relaxed_fts=relaxed_fts
+            )
             # The reranker reads the prefix's text, so it is materialized first.
             prefix = await self._materialize(
                 prefix_fusion.rows(prefix_fusion.ranked[: rerank.candidates]),

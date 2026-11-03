@@ -574,7 +574,11 @@ async def explain_query(
         rerank_pool_size=(collector.rerank.pool_size if collector.rerank is not None else 0),
         embedding_model=repository.configured_embedding_model,
         vector_index=repository.configured_vector_index,
-        fusion_formula_version=FUSION_FORMULA_VERSION,
+        fusion_formula_version=(
+            collector.fusion.formula_version
+            if collector.fusion is not None
+            else FUSION_FORMULA_VERSION
+        ),
         min_similarity=effective_min_similarity,
         min_similarity_source=("query" if query.min_similarity is not None else "config"),
         reranker=RerankerConfigSummary(

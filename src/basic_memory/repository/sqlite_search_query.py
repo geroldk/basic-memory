@@ -241,6 +241,20 @@ def relaxed_fts_text(search_text: str | None) -> str | None:
     return " OR ".join(_relaxed_fts_term(word) for word in words)
 
 
+def word_fts_match(prepared_text: str) -> str:
+    """Rank the word columns in one MATCH while preserving per-column AND semantics.
+
+    SQL OR between separate MATCH cursors does not aggregate their BM25 evidence.
+    A column-set MATCH would instead allow an AND query to span columns. Keeping
+    the original per-column expressions inside one MATCH preserves its row set.
+    """
+    return (
+        f"(title: ({prepared_text}) OR "
+        f"content_stems: ({prepared_text}) OR "
+        f"content_snippet: ({prepared_text}))"
+    )
+
+
 def is_fts5_syntax_error(exc: Exception) -> bool:
     return "fts5: syntax error" in str(exc).lower()
 
@@ -287,18 +301,13 @@ def compile_fts_filter(
         script_query = analyze_script_query(search_text.strip())
         # Trigger: the query contains text from an unsegmented script.
         # Why: the script channel needs one table-level MATCH alongside word fields.
-        # Outcome: mixed queries rank all terms together; word-only queries retain
-        # their established per-column matching and ranking behavior.
+        # Outcome: mixed queries rank all terms together in one MATCH context.
         if script_query.gram_phrases:
             params["text"] = ""
             params["script_text"] = ""
             if script_query.word_text:
                 prepared_text = prepare_search_term(script_query.word_text)
-                params["text"] = (
-                    f"(title: ({prepared_text}) OR "
-                    f"content_stems: ({prepared_text}) OR "
-                    f"content_snippet: ({prepared_text}))"
-                )
+                params["text"] = word_fts_match(prepared_text)
             script_phrases = " AND ".join(
                 f'"{" ".join(phrase)}"' for phrase in script_query.gram_phrases
             )
@@ -320,18 +329,14 @@ def compile_fts_filter(
             # Why: per-column MATCH predicates OR-ed together evaluate NOT inside each
             #      column, so "coffee NOT pour" matched a note whose title has "coffee"
             #      while its body has "pour".
-            # Outcome: one column-filtered MATCH applies the exclusion to the whole row;
-            #      other queries keep their established per-column matching.
+            # Outcome: NOT excludes across the row; other queries retain their
+            # per-column matching inside one ranked MATCH context.
             if re.search(r"\bNOT\b", prepared_text):
                 params["text"] = f"{{title content_stems content_snippet}} : ({prepared_text})"
                 match_conditions.append("search_index MATCH :text")
             else:
-                params["text"] = prepared_text
-                match_conditions.append(
-                    "(search_index.title MATCH :text OR "
-                    "search_index.content_stems MATCH :text OR "
-                    "search_index.content_snippet MATCH :text)"
-                )
+                params["text"] = word_fts_match(prepared_text)
+                match_conditions.append("search_index MATCH :text")
 
     leading_order_by = ""
     if query.title:
@@ -593,7 +598,9 @@ class SQLiteFts:
             if relaxed and params.get("text"):
                 relaxed_fallback_used = True
                 params["text"] = (
-                    f"{SQLITE_WORD_COLUMNS}: ({relaxed})" if "script_text" in params else relaxed
+                    f"{SQLITE_WORD_COLUMNS}: ({relaxed})"
+                    if "script_text" in params
+                    else word_fts_match(relaxed)
                 )
                 logger.debug(
                     "Strict SQLite FTS returned 0 results; retrying relaxed FTS query "
@@ -720,7 +727,7 @@ class SQLiteFts:
                     params["text"] = (
                         f"{SQLITE_WORD_COLUMNS}: ({relaxed})"
                         if "script_text" in params
-                        else relaxed
+                        else word_fts_match(relaxed)
                     )
                     with logfire.span(
                         "search.count.relaxed_fts_retry",
