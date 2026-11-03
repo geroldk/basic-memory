@@ -309,6 +309,16 @@ class BasicMemoryConfig(BaseSettings):
             "required for custom LiteLLM models."
         ),
     )
+    semantic_embedding_max_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Optional FastEmbed Jina-DE tokenizer limit, including special tokens. "
+            "None keeps the exported tokenizer default. Requires single-process embedding; "
+            "does not change the Markdown chunk size."
+        ),
+        ge=2,
+        le=8192,
+    )
     semantic_embedding_forward_dimensions: bool | None = Field(
         default=None,
         description=(
@@ -994,6 +1004,19 @@ class BasicMemoryConfig(BaseSettings):
             ProjectConfig(name=name, home=Path(entry.path), mode=entry.mode)
             for name, entry in self.projects.items()
         ]
+
+    @model_validator(mode="after")
+    def validate_embedding_context_limit(self) -> "BasicMemoryConfig":
+        """Restrict the context override to the validated Jina ONNX path."""
+        if self.semantic_embedding_max_tokens is None:
+            return self
+        if self.semantic_embedding_provider.strip().lower() != "fastembed":
+            raise ValueError("semantic_embedding_max_tokens requires the fastembed provider")
+        if self.semantic_embedding_model.lower() != "jinaai/jina-embeddings-v2-base-de":
+            raise ValueError("semantic_embedding_max_tokens is validated only for Jina-DE")
+        if self.semantic_embedding_parallel is not None and self.semantic_embedding_parallel > 1:
+            raise ValueError("semantic_embedding_max_tokens requires single-process embedding")
+        return self
 
     @model_validator(mode="after")
     def validate_reranker_config(self) -> "BasicMemoryConfig":

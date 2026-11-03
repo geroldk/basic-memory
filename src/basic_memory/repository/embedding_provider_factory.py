@@ -23,7 +23,7 @@ from typing import Any
 # Cache key fields are limited to values that change the *identity* of the loaded
 # provider instance (provider, model_name, explicit LiteLLM endpoint/key routing,
 # dimensions, semantic role/input-type/prefix settings, batch/request knobs,
-# and the resolved cache dir). Thread/parallel knobs are deliberately excluded -
+# the resolved cache dir, and the explicit tokenizer limit). Thread/parallel knobs are excluded -
 # they change ONNX *execution* only, not the loaded weights. Including them caused #872: in a
 # container/cgroup the CPU-derived thread count can drift between calls, producing
 # a fresh cache key and reloading the ~2.3GB model into a CPU arena that never
@@ -42,6 +42,7 @@ type ProviderCacheKey = tuple[
     str | None,
     str | None,
     str,
+    int | None,
 ]
 
 _EMBEDDING_PROVIDER_CACHE: dict[ProviderCacheKey, EmbeddingProvider] = {}
@@ -140,6 +141,7 @@ def _provider_cache_key(app_config: BasicMemoryConfig) -> ProviderCacheKey:
         embedding_prefix_digest(app_config.semantic_embedding_document_prefix),
         embedding_prefix_digest(app_config.semantic_embedding_query_prefix),
         _resolve_cache_dir(app_config),
+        app_config.semantic_embedding_max_tokens,
     )
 
 
@@ -259,6 +261,8 @@ def create_embedding_provider(app_config: BasicMemoryConfig) -> EmbeddingProvide
             extra_kwargs["threads"] = resolved_threads
         if resolved_parallel is not None:
             extra_kwargs["parallel"] = resolved_parallel
+        if app_config.semantic_embedding_max_tokens is not None:
+            extra_kwargs["max_tokens"] = app_config.semantic_embedding_max_tokens
 
         provider = FastEmbedEmbeddingProvider(
             model_name=app_config.semantic_embedding_model,

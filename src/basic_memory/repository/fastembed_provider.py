@@ -51,6 +51,7 @@ class FastEmbedEmbeddingProvider:
             "threads": self.threads,
             "configured_parallel": self.parallel,
             "effective_parallel": self._effective_parallel(),
+            "max_tokens": self.max_tokens,
         }
 
     def __init__(
@@ -62,6 +63,7 @@ class FastEmbedEmbeddingProvider:
         cache_dir: str | None = None,
         threads: int | None = None,
         parallel: int | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self.model_name = model_name
         self.dimensions = dimensions
@@ -69,6 +71,18 @@ class FastEmbedEmbeddingProvider:
         self.cache_dir = cache_dir
         self.threads = threads
         self.parallel = parallel
+        self.max_tokens = max_tokens
+        if max_tokens is not None:
+            if (
+                isinstance(max_tokens, bool)
+                or not isinstance(max_tokens, int)
+                or not 2 <= max_tokens <= 8192
+            ):
+                raise ValueError("max_tokens must be an integer between 2 and 8192")
+            if self._resolved_model_name().lower() != "jinaai/jina-embeddings-v2-base-de":
+                raise ValueError("max_tokens is validated only for Jina-DE")
+            if self._effective_parallel() is not None:
+                raise ValueError("max_tokens requires single-process embedding")
         self._model: TextEmbedding | None = None
         self._model_lock = asyncio.Lock()
 
@@ -99,7 +113,25 @@ class FastEmbedEmbeddingProvider:
             model_kwargs["cache_dir"] = self.cache_dir
         if self.threads is not None:
             model_kwargs["threads"] = self.threads
-        return TextEmbedding(**model_kwargs)
+        model = TextEmbedding(**model_kwargs)
+        if self.max_tokens is not None:
+            from fastembed.text.onnx_text_model import OnnxTextModel
+
+            native = model.model
+            if not isinstance(native, OnnxTextModel) or native.tokenizer is None:
+                raise RuntimeError(
+                    "Jina-DE context override requires an initialized ONNX tokenizer"
+                )
+            # Trigger: the explicit limit differs from the export's 512-token default.
+            # Why: Jina-DE's ONNX model supports 8192; worker processes would reload
+            # the default, so this override requires the single-process path above.
+            # Outcome: only this provider's tokenizer changes; cached artifacts stay intact.
+            truncation = native.tokenizer.truncation or {}
+            native.tokenizer.enable_truncation(
+                max_length=self.max_tokens,
+                direction=truncation.get("direction", "right"),
+            )
+        return model
 
     def _model_cache_candidates(self) -> list[tuple[Path, str]]:
         """Resolve ``(snapshot_dir, model_file)`` pairs for this model under ``cache_dir``.
@@ -267,12 +299,13 @@ class FastEmbedEmbeddingProvider:
             logger.info(
                 "FastEmbed model loaded: model_name={model_name} batch_size={batch_size} "
                 "threads={threads} configured_parallel={configured_parallel} "
-                "effective_parallel={effective_parallel}",
+                "effective_parallel={effective_parallel} max_tokens={max_tokens}",
                 model_name=self._resolved_model_name(),
                 batch_size=self.batch_size,
                 threads=self.threads,
                 configured_parallel=self.parallel,
                 effective_parallel=self._effective_parallel(),
+                max_tokens=self.max_tokens,
             )
             return self._model
 
