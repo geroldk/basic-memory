@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 
 from loguru import logger
@@ -43,15 +43,23 @@ class GitProjectionWorker:
     Local root/repository bindings and OS locks enforce unique ownership.
     """
 
-    def __init__(self, pipeline: GitProjectionPipeline, *, poll_interval: float = 5) -> None:
+    def __init__(
+        self,
+        pipeline: GitProjectionPipeline,
+        *,
+        poll_interval: float = 5,
+        content_gate: asyncio.Lock | None = None,
+    ) -> None:
         if poll_interval <= 0:
             raise ValueError("poll_interval must be positive")
         self.pipeline = pipeline
         self.progress = GitProgressRepository(pipeline.project_id, pipeline.session_maker)
         self.poll_interval = poll_interval
+        self.content_gate = content_gate
         self._wake_index = asyncio.Event()
         self._wake_vectors = asyncio.Event()
         self._running = False
+        self.startup_content_commit: str | None = None
 
     def notify(self) -> None:
         """Optional latency hint after publication; polling never depends on delivery."""
@@ -67,10 +75,13 @@ class GitProjectionWorker:
         )
 
     @asynccontextmanager
-    async def run(self) -> AsyncIterator["GitProjectionWorker"]:
+    async def run(
+        self, *, recover_content_before_yield: bool = False
+    ) -> AsyncIterator["GitProjectionWorker"]:
         if self._running:
             raise RuntimeError("Git projection worker is already running")
         self._running = True
+        self.startup_content_commit = None
         try:
             async with (
                 own_git_project(
@@ -82,6 +93,12 @@ class GitProjectionWorker:
                 ),
                 asyncio.TaskGroup() as group,
             ):
+                if recover_content_before_yield:
+                    # Only SQL content gates admission. Slow files/graph/vectors
+                    # start in the background after this explicit startup barrier.
+                    commit_id = await asyncio.to_thread(self.pipeline.repository.head)
+                    await self.pipeline.recover_content(commit_id, redrive_materialization=False)
+                    self.startup_content_commit = commit_id
                 index = group.create_task(self._loop(vectors=False), name="git-projection-index")
                 vectors = group.create_task(self._loop(vectors=True), name="git-projection-vectors")
                 try:
@@ -137,8 +154,10 @@ class GitProjectionWorker:
             if run_id is None:
                 return False
             try:
-                await self.pipeline.apply(stage, row.target_commit)
-                await self.pipeline.require_head(row.target_commit)
+                gate = self.content_gate if stage == "content" else None
+                async with gate if gate is not None else nullcontext():
+                    await self.pipeline.apply(stage, row.target_commit)
+                    await self.pipeline.require_head(row.target_commit)
             except Exception as error:
                 await self.progress.finish(stage, row.target_commit, run_id, error=str(error))
                 logger.warning(

@@ -99,24 +99,7 @@ class GitLayoutRepository:
             basis = note.content
             if basis is None:
                 raise GitProjectionConflict("Cannot retire a note without proven accepted content")
-            retirement = await session.get(GitFileRetirement, (self.project_id, note.file_path))
-            checksums = {basis.checksum}
-            if note.file_checksum is not None:
-                checksums.add(note.file_checksum)
-            if retirement is None:
-                session.add(
-                    GitFileRetirement(
-                        project_id=self.project_id,
-                        file_path=note.file_path,
-                        retirement_id=str(uuid4()),
-                        expected_checksums=sorted(checksums),
-                    )
-                )
-            else:
-                retirement.retirement_id = str(uuid4())
-                retirement.expected_checksums = sorted(
-                    checksums | set(retirement.expected_checksums)
-                )
+            await self.retain_old_file(session, note)
             condition = (
                 NoteContent.entity_id == note.entity_id,
                 NoteContent.project_id == self.project_id,
@@ -186,6 +169,32 @@ class GitLayoutRepository:
             )
         await session.flush()
         return len(moved), len(removed)
+
+    async def retain_old_file(self, session: AsyncSession, note: GitLocalNote) -> None:
+        """Retain cleanup evidence before an accepted move/delete commits in SQL.
+
+        The caller must prove the source UUID/path/content in published Git first.
+        This survives deletion of Entity and its cascading NoteContent row.
+        """
+        basis = note.content
+        if basis is None:
+            raise GitProjectionConflict("Cannot retire a note without proven accepted content")
+        retirement = await session.get(GitFileRetirement, (self.project_id, note.file_path))
+        checksums = {basis.checksum}
+        if note.file_checksum is not None:
+            checksums.add(note.file_checksum)
+        if retirement is None:
+            session.add(
+                GitFileRetirement(
+                    project_id=self.project_id,
+                    file_path=note.file_path,
+                    retirement_id=str(uuid4()),
+                    expected_checksums=sorted(checksums),
+                )
+            )
+        else:
+            retirement.retirement_id = str(uuid4())
+            retirement.expected_checksums = sorted(checksums | set(retirement.expected_checksums))
 
     async def retirements(self, session: AsyncSession) -> tuple[GitRetiredFile, ...]:
         rows = await session.scalars(

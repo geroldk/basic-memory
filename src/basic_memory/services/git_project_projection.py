@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from basic_memory import db
 from basic_memory.file_utils import ParseError, compute_checksum, parse_frontmatter
 from basic_memory.markdown.entity_parser import EntityParser
 from basic_memory.models import Entity
@@ -45,6 +46,7 @@ async def project_git_content(
     session_maker: async_sessionmaker[AsyncSession],
     read_cache: ReadCacheInvalidator | None = None,
     commit_id: str | None = None,
+    redrive_materialization: bool = True,
 ) -> GitContentProjection:
     """Restore portable UUIDs and exact NoteContent, leaving file/index work pending.
 
@@ -165,7 +167,7 @@ async def project_git_content(
             raise GitProjectionConflict(
                 "Published Git head advanced during projection; retry latest"
             )
-        async with session_maker() as session, session.begin():
+        async with db.scoped_session(session_maker) as session:
             moved, removed = await layout.apply(session, expected=local_notes, target=prepared)
         changed += moved
         for local in local_notes:
@@ -184,7 +186,7 @@ async def project_git_content(
                 raise GitProjectionConflict(
                     "Published Git head advanced during projection; retry latest"
                 )
-            async with session_maker() as session, session.begin():
+            async with db.scoped_session(session_maker) as session:
                 target = prepared[note.external_id]
                 restored = await projection.restore_note(
                     session,
@@ -193,6 +195,7 @@ async def project_git_content(
                     markdown_content=target.content,
                     checksum=target.checksum,
                     expected=bases[note.external_id],
+                    redrive_materialization=redrive_materialization,
                 )
             changed += int(restored)
     return GitContentProjection(

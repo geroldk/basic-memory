@@ -68,13 +68,7 @@ class GitProjectionPipeline:
     async def apply(self, stage: GitProjectionStage, commit_id: str) -> None:
         await self.require_registration()
         if stage == "content":
-            await project_git_content(
-                self.repository,
-                project_id=self.project_id,
-                session_maker=self.session_maker,
-                read_cache=self.read_cache,
-                commit_id=commit_id,
-            )
+            await self.recover_content(commit_id)
             return
 
         snapshot = await asyncio.to_thread(self.repository.snapshot, commit_id)
@@ -154,6 +148,19 @@ class GitProjectionPipeline:
                 await self.search_service.repository.delete_stale_vector_rows()
                 await self.search_service.repository.reconcile_vector_index()
         await self.require_head(commit_id)
+
+    async def recover_content(
+        self, commit_id: str, *, redrive_materialization: bool = True
+    ) -> None:
+        await self.require_registration()
+        await project_git_content(
+            self.repository,
+            project_id=self.project_id,
+            session_maker=self.session_maker,
+            read_cache=self.read_cache,
+            commit_id=commit_id,
+            redrive_materialization=redrive_materialization,
+        )
 
     async def retire_old_files(self, snapshot: GitSnapshot) -> None:
         """Remove only proven older bytes; a private editor file blocks completion."""

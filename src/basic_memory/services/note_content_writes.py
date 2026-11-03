@@ -70,6 +70,21 @@ from basic_memory.services.note_write_outcomes import (
 )
 
 AcceptedNoteChange = RuntimeAcceptedNoteChange[RuntimeNoteContentResponsePayload]
+type AcceptedNoteMutationRequest = (
+    AcceptedNoteCreateMutation
+    | AcceptedNoteUpdateMutation
+    | AcceptedNoteEditMutation
+    | AcceptedNoteMoveMutation
+    | AcceptedNoteDeleteMutation
+)
+
+
+class NoteContentMutationExecutor(Protocol):
+    """An explicit runtime boundary that owns acceptance and durable publication."""
+
+    async def accept(self, request: AcceptedNoteMutationRequest) -> AcceptedNoteChange: ...
+
+
 # The dataclass uses slots, so its default lives on instances, not the class.
 STALE_BASE_CHECKSUM_MESSAGE = AcceptedNoteBaseChecksumConflict(db_checksum=None).message
 
@@ -134,6 +149,13 @@ class NoteContentMutationServiceError(Exception):
         self.detail = detail
 
 
+class NoteContentPublicationConflict(NoteContentMutationServiceError):
+    """A stale publication basis, distinct from an occupied note path."""
+
+    def __init__(self, detail: NoteContentMutationErrorDetail) -> None:
+        super().__init__(409, detail)
+
+
 def note_content_mutation_error_from_rejection(
     rejection: AcceptedNoteMutationRejection,
 ) -> NoteContentMutationServiceError:
@@ -184,12 +206,28 @@ class NoteContentMutationService:
         content_freshener: NoteContentMutationFreshener | None = None,
         actor_resolver: NoteContentMutationActorResolver | None = None,
         read_cache: ReadCacheInvalidator | None = None,
+        mutation_executor: NoteContentMutationExecutor | None = None,
     ) -> None:
         self.session_maker = session_maker
         self.mutation_dependencies = mutation_dependencies
         self.content_freshener = content_freshener
         self.actor_resolver = actor_resolver
         self.read_cache = read_cache
+        self.mutation_executor = mutation_executor
+
+    async def _execute_runtime_mutation(
+        self, request: AcceptedNoteMutationRequest
+    ) -> AcceptedNoteChange:
+        assert self.mutation_executor is not None
+        # The executor owns SQL acceptance and subsequent indexing. In particular,
+        # the Git runtime must not freshen private disk edits into accepted SQL or
+        # run the legacy post-commit graph/search path before returning.
+        async with self._mutation_cache_scope(
+            request.project_external_id, freshened=ReadCacheChange()
+        ) as cache_change:
+            accepted = await self.mutation_executor.accept(request)
+            cache_change.record(ReadCacheChange.whole_project())
+            return accepted
 
     async def on_accepted_mutation(
         self,
@@ -511,6 +549,8 @@ class NoteContentMutationService:
             return Rejected(error.rejection)
         except ParseError as error:
             raise NoteContentMutationServiceError(400, str(error)) from error
+        except NoteContentPublicationConflict:
+            raise
         except NoteContentMutationServiceError as error:
             # Legacy create/update adapters expose structured service errors.
             # Translate their recoverable outcomes once; preserve other refusals.
@@ -666,6 +706,8 @@ class NoteContentMutationService:
             ),
             source=actor.source,
         )
+        if self.mutation_executor is not None:
+            return await self._execute_runtime_mutation(request)
         freshened = ReadCacheChange()
         if isinstance(request, AcceptedNoteUpdateMutation):
             freshened = await self.freshen_existing_note_content(
@@ -735,6 +777,22 @@ class NoteContentMutationService:
             actor_name=actor_name,
         )
         try:
+            if self.mutation_executor is not None:
+                return await self._execute_runtime_mutation(
+                    AcceptedNoteEditMutation(
+                        project_external_id=project_external_id,
+                        entity_external_id=entity_external_id,
+                        data=data,
+                        actor=accepted_note_mutation_actor(
+                            user_profile_id=actor_context.user_profile_id,
+                            actor_kind=actor_context.actor_kind,
+                            actor_name=actor_context.actor_name,
+                            author=actor_context.author,
+                        ),
+                        source=actor_context.source,
+                        base_checksum=base_checksum,
+                    )
+                )
             freshened = await self.freshen_existing_note_content(
                 project_external_id=project_external_id,
                 entity_external_id=entity_external_id,
@@ -798,6 +856,22 @@ class NoteContentMutationService:
             actor_name=actor_name,
         )
         try:
+            if self.mutation_executor is not None:
+                return await self._execute_runtime_mutation(
+                    AcceptedNoteMoveMutation(
+                        project_external_id=project_external_id,
+                        entity_external_id=entity_external_id,
+                        destination_path=destination_path,
+                        actor=accepted_note_mutation_actor(
+                            user_profile_id=actor_context.user_profile_id,
+                            actor_kind=actor_context.actor_kind,
+                            actor_name=actor_context.actor_name,
+                            author=actor_context.author,
+                        ),
+                        source=actor_context.source,
+                        base_checksum=base_checksum,
+                    )
+                )
             freshened = await self.freshen_existing_note_content(
                 project_external_id=project_external_id,
                 entity_external_id=entity_external_id,
@@ -858,6 +932,20 @@ class NoteContentMutationService:
             actor_name=actor_name,
         )
         try:
+            if self.mutation_executor is not None:
+                return await self._execute_runtime_mutation(
+                    AcceptedNoteDeleteMutation(
+                        project_external_id=project_external_id,
+                        entity_external_id=entity_external_id,
+                        actor=accepted_note_mutation_actor(
+                            user_profile_id=actor_context.user_profile_id,
+                            actor_kind=actor_context.actor_kind,
+                            actor_name=actor_context.actor_name,
+                            author=actor_context.author,
+                        ),
+                        base_checksum=base_checksum,
+                    )
+                )
             freshened = await self.freshen_existing_note_content(
                 project_external_id=project_external_id,
                 entity_external_id=entity_external_id,

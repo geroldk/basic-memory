@@ -128,6 +128,7 @@ class GitProjectionRepository:
         markdown_content: str,
         checksum: str,
         expected: GitProjectionContentBasis | None,
+        redrive_materialization: bool = True,
     ) -> bool:
         if fields.external_id != str(external_id):
             raise GitProjectionConflict("Prepared fields have a different note UUID")
@@ -139,6 +140,8 @@ class GitProjectionRepository:
             and current.markdown_content == markdown_content
             and current.checksum == checksum
         ):
+            if not redrive_materialization:
+                return False
             # Re-drive lost files or interrupted materialization without creating
             # a new content revision. The existing writer still guards disk bytes.
             updated = await self.contents.update_state_fields(

@@ -1,6 +1,6 @@
 # BM-006: isolated Git publication, identity recovery and catch-up
 
-Status: four isolated implementation slices, 2026-11-03. This is experimental code on
+Status: five isolated implementation slices, 2026-11-04. This is experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
 configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
 installation continue to use the existing write path.
@@ -268,20 +268,22 @@ controlling those sources remains mandatory before production enablement.
 The first slice is intentionally insufficient for a production switch. Continue
 in this order:
 
-1. Add controlled first import/migration of existing project state. Proven Git
-   moves/deletions and local root/worker binding are implemented; unproven local
-   notes remain protected. Define controlled root remapping. Index rewrites are
-   refused; automatic normalization adaptation is not implemented. Measure the
+1. Complete controlled first import/migration and host integration. The isolated
+   adoption primitive below preserves accepted-but-unwritten content, but does not
+   stop legacy writers. Unindexed files, resources and noncanonical input remain
+   protected. Define controlled root remapping. Index rewrites are refused;
+   automatic normalization adaptation is not implemented. Measure the
    current whole-stage rebuild/catch-up cost before enabling it for real projects.
-2. Wire the new worker into controlled Git-enabled startup and post-commit paths.
-   Recover SQL content before admitting writes based on it; an up-to-date graph or
-   vector index is not required for admission. Keep all expensive derived work off
-   the write response path. Existing acceptance hooks still perform some synchronous
-   graph/full-text work; that path has not been converted by the new worker slice.
-3. Capture the Git basis before write preparation. Handle cancellation, SQLite
-   commit failure after Git publication, concurrent processes and whole-process
-   termination at that boundary. Cover move/delete and imports through the same
-   publisher or reject them before acceptance. Do not leave a bypass enabled.
+2. Select the opt-in executor in controlled API/MCP lifespans/dependencies, expose
+   honest public progress and reject remaining import/index/directory bypasses.
+   Startup content recovery and the post-commit worker are isolated below; default
+   dependencies still do not enable them. Core accepted-note runners still assemble
+   relation generations and persist some observation/section state inside acceptance;
+   finish moving that derived persistence before claiming fully asynchronous acceptance.
+3. Preserve the captured Git basis before preparation and its verified cancellation,
+   SQLite failure and whole-ASGI-process recovery behavior when wiring the host.
+   Create/update/edit/move/delete are covered by the isolated executor; imports and
+   bulk/directory operations must use the publisher or be refused before acceptance.
 4. Add explicit transaction API/state, fixed-base and own-draft reads, status,
    keep-alive, 30-minute inactivity expiry and seven-day expired-draft retention.
    Expiry never commits. Terminal evidence must survive draft cleanup. Conflict
@@ -301,11 +303,85 @@ in this order:
 Do not enable the experimental hook on existing projects before these obligations
 are implemented and the isolated boundary tests are extended accordingly.
 
+## Reviewable first adoption
+
+`services/git_project_adoption.py` provides `prepare_git_adoption()` and
+`publish_git_adoption()`. They require externally stopped/drained legacy writers,
+including accepted in-flight mutations, materializers, editor and Cloud imports.
+The existing root/repository ownership excludes other Git workers; it does not
+prove that external precondition or perform a productive cutover.
+
+Preparation requires an unused initialization commit and preserves project/note
+UUIDs and exact bytes in local `bm-adoption.json`. Accepted NoteContent takes
+precedence over an older or missing materialized file. Old disk bytes and materialization
+lineage are retained as migration evidence. File-first notes require the indexed
+file checksum. Unknown editor bytes, unindexed files, symlinks, unreadable directories,
+non-Markdown resources/entities and noncanonical frontmatter are refused before
+publication. Unknown control files are not silently excluded. The reserved root
+control directory contains only the owned Git binding/lock files during adoption.
+
+The retained plan is not silently refreshed. Publication revalidates SQL/file state,
+root registration and the fixed Git basis, then publishes through the same CAS.
+Retry resolves its terminal transaction before comparing the old migration basis:
+normal projection may already have advanced SQL/materialized files after a lost
+answer. The plan is local operational evidence containing private content; retain
+it with backups. An ordinary Git clone or branch push does not carry it.
+
+`settle_git_publication()` in the Git repository module waits for publication to
+settle even if the caller is cancelled repeatedly. Ownership/admission cannot be
+released while a detached thread can still change the published branch. Cancellation
+still reaches the caller; durable Git determines subsequent recovery.
+
+## Opt-in startup and real API acceptance
+
+`services/git_project_runtime.py` implements the optional mutation executor accepted
+by `NoteContentMutationService`. Default dependencies do not select it. Its lifecycle
+owns the existing Git worker and first restores SQL content before yielding admission;
+it does not wait for files, graph or vectors. The exact restored startup commit is
+retained, rather than incorrectly sampling a potentially newer head afterward.
+
+Each implicit mutation acquires a short local admission gate, captures immutable Git
+before calling the real BM preparer/runner, and verifies that SQL contains that
+published basis. A newer peer publication first causes content recovery. Private SQL
+bytes/checksums/identities cannot become the basis of a new publication. The worker
+shares the gate only for SQL content projection; vectors never hold it. Explicit
+agent planning must not run inside this implicit mutation gate.
+
+Create, update, append/edit, move and delete prepare through the normal BM core.
+Git publication precedes SQL commit; old-file permissions survive successful SQL
+move/delete even after the old entity is gone. The returned change suppresses legacy
+materialization/cleanup and the service skips its legacy post-commit graph/FTS work.
+The lifecycle worker performs files/graph/FTS/vectors. Core pre-commit derived writes
+remain a separate performance/integration obligation as described above.
+
+A changed Git basis returns a distinct HTTP 409 publication conflict, including base
+and actual source commits. It must not be converted by `write_note()` into an
+`already_exists` path outcome. A failed SQL commit after successful Git publication
+reports HTTP 503 with `published_commit` and an instruction to inspect status before
+retrying; it never claims the Git write was rolled back. This is not V2 operation
+deduplication. Cancellation/process loss recovers from Git without replaying append.
+
+Both Git content/layout projection and this acceptance path use BM's existing
+`db.scoped_session` for writes. SQLite foreign-key enforcement is connection-local;
+a raw fresh session can otherwise leave an incoming relation pointing at a deleted
+target. A fresh-connection regression verifies preserved links with `to_id=NULL`.
+This adds no row locks or wider derived-state transaction.
+
+`test-int/test_git_runtime_integration.py` exercises the real API with an explicitly
+injected executor, blocked graph/vector work, concurrent writes, peer publication
+during preparation, SQL commit failure, shutdown and repeated cancellation.
+`git_runtime_crash.py` terminates the entire in-process ASGI interpreter before/after
+Git publication and before/after SQLite's commit call. Restart uses the real worker
+against the same Git/SQLite state. Background loops are paused only in the dying
+child to target the foreground commit boundary. This is not a TCP server or a
+power-loss proof. All ordinary tests use deterministic embeddings.
+
 ## Validation
 
-The isolated suite passes 152 cases; all 13 Git publication/projection/worker
-modules (including both migrations) have 838/838 executable lines covered.
-A further 123 existing write/read/materialization/BM-002/BM-003 regression
+The isolated suite passes 204 cases; all 15 Git publication/projection/worker/
+adoption/runtime modules (including both migrations) have 1115/1115 executable
+lines covered. One statically unreachable exhaustive-match guard is excluded.
+A further 132 existing write/read/materialization/authorship/BM-002/BM-003 regression
 cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
 is not a clean full-tree type-check result.
@@ -317,21 +393,25 @@ python -m pytest tests/repository/test_git_publication.py \
   tests/schemas/test_git_project_manifest.py tests/services/test_git_project_projection.py \
   tests/repository/test_git_progress_repository.py tests/test_git_projection_progress_migration.py \
   tests/test_migration_graph.py test-int/test_git_publication_integration.py \
-  tests/repository/test_git_layout_repository.py tests/index/test_git_project_ownership.py \
+  tests/repository/test_git_layout_repository.py tests/repository/test_git_cleanup_permissions.py \
+  tests/index/test_git_project_ownership.py \
   tests/test_git_file_retirement_migration.py test-int/test_git_layout_integration.py \
-  test-int/test_git_projection_worker_integration.py -q --no-cov
+  test-int/test_git_projection_worker_integration.py test-int/test_git_adoption_integration.py \
+  test-int/test_git_runtime_integration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
   tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
   tests/test_git_file_retirement_migration.py \
-  test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
+  src/basic_memory/services/note_content_writes.py \
+  test-int/test_git*.py test-int/fixtures/git*crash.py
 ty check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
   tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
   tests/test_git_file_retirement_migration.py \
-  test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
+  src/basic_memory/services/note_content_writes.py \
+  test-int/test_git*.py test-int/fixtures/git*crash.py
 ```
 
 Use directory-based coverage (`--cov=src/basic_memory/repository`); an earlier

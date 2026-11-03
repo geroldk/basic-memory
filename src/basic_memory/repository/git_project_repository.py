@@ -7,6 +7,7 @@ single branch update publishes bytes and evidence together. SQLite stays outside
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -66,6 +67,27 @@ class GitPublication:
 def _require_commit_id(commit_id: str) -> None:
     if _COMMIT_ID.fullmatch(commit_id) is None:
         raise ValueError("Expected a full SHA-1 Git commit ID")
+
+
+async def settle_git_publication(
+    repository: GitProjectRepository, prepared: PreparedGitPublication
+) -> GitPublication:
+    """Settle publication before cancellation can release a local ownership gate.
+
+    The caller still receives cancellation and must recover from durable Git.
+    Repeated cancellation never detaches a thread that can still publish.
+    """
+    task = asyncio.create_task(asyncio.to_thread(repository.publish, prepared))
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = error
+    if cancelled is not None:
+        task.exception()
+        raise cancelled
+    return task.result()
 
 
 class GitProjectRepository:
@@ -146,6 +168,14 @@ class GitProjectRepository:
 
     def head(self) -> str:
         return self._git("rev-parse", "--verify", PUBLISHED_REF).strip().decode("ascii")
+
+    def initial_snapshot(self) -> GitSnapshot:
+        """Require the empty initialization commit before adopting a legacy project."""
+        snapshot = self.snapshot()
+        parents = self._git("rev-list", "--parents", "-n", "1", snapshot.commit_id).split()
+        if snapshot.files or len(parents) != 1:
+            raise GitPublicationError("First adoption requires an unused project repository")
+        return snapshot
 
     def transaction_status(self, transaction_id: UUID) -> GitPublication | None:
         result = self._run("rev-parse", "--verify", "--quiet", f"refs/bm/receipts/{transaction_id}")
