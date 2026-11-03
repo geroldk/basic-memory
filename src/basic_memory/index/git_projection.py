@@ -1,0 +1,225 @@
+"""Opt-in local Git projection through BM's guarded file and real index pipeline.
+
+No normal startup or write dependency enables this experimental composition yet.
+The caller owns the project and must exclude legacy writers and other workers.
+"""
+
+import asyncio
+import json
+from contextlib import nullcontext
+from dataclasses import dataclass
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from basic_memory.config import BasicMemoryConfig
+from basic_memory.file_utils import compute_checksum
+from basic_memory.index.local_dependencies import build_local_markdown_file_indexer
+from basic_memory.index.note_content_materialization import run_recovery_materialization
+from basic_memory.indexing.batch_indexer import BatchIndexer
+from basic_memory.indexing.index_file_runner import IndexFileExecutor
+from basic_memory.indexing.models import IndexFrontmatterUpdate, IndexFrontmatterWriteResult
+from basic_memory.markdown import EntityParser, MarkdownProcessor
+from basic_memory.models import Entity, NoteContent, Project
+from basic_memory.read_cache import ReadCacheInvalidator, invalidate_cache
+from basic_memory.repository import EntityRepository, ObservationRepository, RelationRepository
+from basic_memory.repository.git_progress_repository import GitProjectionStage
+from basic_memory.repository.git_project_repository import GitProjectRepository, GitSnapshot
+from basic_memory.repository.git_projection_repository import GitProjectionConflict
+from basic_memory.repository.search_repository import create_search_repository
+from basic_memory.runtime.note_content import (
+    RuntimeNoteMaterializationJobRequest,
+    RuntimeNoteMaterializationStatus,
+)
+from basic_memory.services import EntityService, FileService
+from basic_memory.services.git_project_projection import project_git_content
+from basic_memory.services.link_resolver import LinkResolver
+from basic_memory.services.search_service import SearchService
+
+
+class PublishedGitIndexWriter:
+    """Indexing may derive state, but never normalize already published Markdown."""
+
+    async def write_frontmatter(
+        self, update: IndexFrontmatterUpdate
+    ) -> IndexFrontmatterWriteResult:
+        raise GitProjectionConflict(f"Indexing would rewrite published Git bytes: {update.path}")
+
+
+@dataclass(frozen=True, slots=True)
+class GitProjectionPipeline:
+    repository: GitProjectRepository
+    project_id: int
+    project_external_id: str
+    session_maker: async_sessionmaker[AsyncSession]
+    file_service: FileService
+    file_indexer: IndexFileExecutor
+    search_service: SearchService
+    vector_key: str
+    read_cache: ReadCacheInvalidator | None = None
+
+    async def apply(self, stage: GitProjectionStage, commit_id: str) -> None:
+        if stage == "content":
+            await project_git_content(
+                self.repository,
+                project_id=self.project_id,
+                session_maker=self.session_maker,
+                read_cache=self.read_cache,
+                commit_id=commit_id,
+            )
+            return
+
+        snapshot = await asyncio.to_thread(self.repository.snapshot, commit_id)
+        invalidation = (
+            invalidate_cache(self.read_cache, self.project_external_id)
+            if self.read_cache is not None
+            else nullcontext()
+        )
+        async with invalidation:
+            if stage == "vectors" and not await self.search_service.semantic_effectively_enabled():
+                # A missing backend must remain visible as unavailable, never "ready".
+                raise GitProjectionConflict("Semantic backend unavailable; vectors remain pending")
+            for note in snapshot.manifest.notes:
+                await self.require_head(commit_id)
+                async with self.session_maker() as session:
+                    entity = await session.scalar(
+                        select(Entity).where(
+                            Entity.project_id == self.project_id,
+                            Entity.external_id == str(note.external_id),
+                            Entity.file_path == note.path,
+                        )
+                    )
+                    content = (
+                        await session.get(NoteContent, entity.id) if entity is not None else None
+                    )
+                    if content is None or content.markdown_content != snapshot.files[note.path]:
+                        raise GitProjectionConflict("SQL content has not reached this Git target")
+                    entity_id, version, checksum = (
+                        content.entity_id,
+                        content.db_version,
+                        content.db_checksum,
+                    )
+                if stage == "files":
+                    result = await run_recovery_materialization(
+                        RuntimeNoteMaterializationJobRequest(
+                            project_id=self.project_id,
+                            entity_id=entity_id,
+                            db_version=version,
+                            db_checksum=checksum,
+                            source="git-projection",
+                        ),
+                        session_maker=self.session_maker,
+                        file_service=self.file_service,
+                    )
+                    if result.status is not RuntimeNoteMaterializationStatus.written:
+                        raise GitProjectionConflict(f"File materialization: {result.status.value}")
+                await self.require_file(snapshot, note.path)
+                if stage == "graph":
+                    indexed = await self.file_indexer.index_file(note.path, source="git-projection")
+                    if (
+                        indexed.content_superseded
+                        or indexed.external_id != str(note.external_id)
+                        or indexed.content_checksum
+                        != await compute_checksum(snapshot.files[note.path])
+                    ):
+                        raise GitProjectionConflict(
+                            "Index did not publish the target note generation"
+                        )
+                    await self.require_file(snapshot, note.path)
+                elif stage == "vectors":
+                    vectors = await self.search_service.sync_entity_vectors(entity_id)
+                    if (
+                        vectors.entities_failed
+                        or vectors.entities_deferred
+                        # An unchanged entity is both synced and skipped by BM's
+                        # repository; these counters are not disjoint outcomes.
+                        or not (vectors.entities_synced == 1 or vectors.entities_skipped == 1)
+                    ):
+                        raise GitProjectionConflict(
+                            "Vector sync incomplete: " + "; ".join(vectors.sample_errors)
+                        )
+        await self.require_head(commit_id)
+
+    async def require_head(self, commit_id: str) -> None:
+        if commit_id != await asyncio.to_thread(self.repository.head):
+            raise GitProjectionConflict("Git head advanced; retry the latest published target")
+
+    async def require_file(self, snapshot: GitSnapshot, path: str) -> None:
+        actual = await self.file_service.read_file_bytes(path)
+        if actual != snapshot.files[path].encode("utf-8"):
+            raise GitProjectionConflict(
+                "File differs from published Git bytes; import requires review"
+            )
+
+
+def build_git_projection_pipeline(
+    repository: GitProjectRepository,
+    *,
+    project: Project,
+    session_maker: async_sessionmaker[AsyncSession],
+    app_config: BasicMemoryConfig,
+    read_cache: ReadCacheInvalidator | None = None,
+) -> GitProjectionPipeline:
+    """Explicit local composition; no global config, new daemon or default enablement."""
+    root = Path(project.path)
+    parser = EntityParser(root)
+    files = FileService(
+        root, MarkdownProcessor(parser, app_config=app_config), app_config=app_config
+    )
+    entities = EntityRepository(project.id)
+    observations = ObservationRepository(project.id)
+    relations = RelationRepository(project.id)
+    searches = create_search_repository(session_maker, project.id, app_config)
+    search = SearchService(searches, entities, files, session_maker)
+    entity_service = EntityService(
+        parser,
+        entities,
+        observations,
+        relations,
+        files,
+        LinkResolver(entities, search, session_maker, app_config),
+        session_maker,
+        search_service=search,
+        app_config=app_config,
+    )
+    batch = BatchIndexer(
+        project_id=project.id,
+        app_config=app_config,
+        entity_service=entity_service,
+        entity_repository=entities,
+        observation_repository=observations,
+        relation_repository=relations,
+        search_service=search,
+        file_writer=PublishedGitIndexWriter(),
+        session_maker=session_maker,
+    )
+    indexer = build_local_markdown_file_indexer(
+        project_id=project.id,
+        file_service=files,
+        session_maker=session_maker,
+        entity_repository=entities,
+        batch_indexer=batch,
+        search_service=search,
+    )
+    vector_key = json.dumps(
+        {
+            "version": 1,
+            "model": searches.configured_embedding_model,
+            "index": searches.configured_vector_index,
+            "dimensions": app_config.semantic_embedding_dimensions,
+            "max_tokens": app_config.semantic_embedding_max_tokens,
+        },
+        sort_keys=True,
+    )
+    return GitProjectionPipeline(
+        repository,
+        project.id,
+        project.external_id,
+        session_maker,
+        files,
+        indexer,
+        search,
+        vector_key,
+        read_cache,
+    )

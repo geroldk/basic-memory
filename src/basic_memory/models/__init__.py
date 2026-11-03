@@ -2,6 +2,7 @@
 
 import basic_memory
 from basic_memory.models.base import Base
+from basic_memory.models.git_projection_progress import GitProjectionProgress
 from basic_memory.models.knowledge import (
     Entity,
     MemoryTimeIndex,
@@ -18,6 +19,7 @@ __all__ = [
     "Base",
     "AcceptedProjectNoteChange",
     "Entity",
+    "GitProjectionProgress",
     "MemoryTimeIndex",
     "NoteContent",
     "NoteFileVacate",

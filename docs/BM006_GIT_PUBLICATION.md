@@ -1,6 +1,6 @@
-# BM-006: isolated Git publication and identity recovery
+# BM-006: isolated Git publication, identity recovery and catch-up
 
-Status: two isolated implementation slices, 2026-11-03. This is experimental code on
+Status: three isolated implementation slices, 2026-11-03. This is experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
 configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
 installation continue to use the existing write path.
@@ -131,8 +131,8 @@ SQLite database. Occupied numeric IDs force different local project/entity numbe
 The normal API still reads the original UUIDs and exact contents; relations resolve
 to the new numeric target IDs, and physical vectors match the expected chunks. This
 proves portable identity/content recovery in the isolated SQLite experiment. The
-clone keeps the original canonical project naming/settings. Automatic lifecycle
-recovery, configuration variation and production migration remain separate work.
+clone keeps the original canonical project naming/settings. Production lifecycle
+wiring, configuration variation and production migration remain separate work.
 
 Additional cases exercise successful API edits and rejection/SQL rollback when a
 different commit advances the same project's Git basis. Core tests use actual Git
@@ -141,19 +141,81 @@ repositories, concurrent publishers, and child processes that terminate with
 tests do not kill the whole ASGI process mid-SQL commit, inject failures inside
 Git's ref implementation, or prove power-loss/filesystem durability.
 
+## Durable catch-up worker
+
+`index/git_projection.py` explicitly composes the existing BM guarded materializer,
+single-file graph/full-text indexer and `SearchService.sync_entity_vectors`. It
+does not enable them in existing API/MCP/startup dependencies. Indexing uses a
+writer that **rejects frontmatter rewrites** before touching the published file.
+Unsupported local normalization settings therefore leave graph progress pending
+instead of changing Git's bytes. Safe automatic adaptation remains future work.
+
+`models/git_projection_progress.py`, migration `0043` and
+`repository/git_progress_repository.py` persist one local row per project and stage:
+
+| Stage | Completion means |
+| --- | --- |
+| `content` | Exact current Git Markdown and portable UUIDs have reached SQL. |
+| `files` | Every note passed BM's guarded materializer and exact byte verification. |
+| `graph` | Every note explicitly ran graph/full-text indexing, including unchanged files. |
+| `vectors` | Every note completed vector synchronization or its explicit note opt-out. |
+
+Rows retain target SHA, last completely processed SHA, running SHA/attempt UUID,
+attempt count and the most recent error. Successful file recovery never implies
+graph or vector completion. Missing semantic infrastructure and failed/deferred
+vector results stay pending; they do not change a requested search mode. BM's
+unchanged-vector outcome can count as both synced and skipped, which is accepted
+without double-counting it as a failure. A vector configuration key invalidates
+only the vector checkpoint when model/index/dimensions/token policy changes. Its
+version must be bumped when the derived chunk/index policy changes in code.
+
+`index/git_projection_worker.py` provides an explicit `async with worker.run()`
+lifecycle. It owns two serial tasks: content → files → graph, and vectors after
+graph completion. A slow embedding call cannot block newer content/file/graph
+catch-up. Each lane retries failures with bounded exponential backoff (poll
+interval × up to 64); publication notifications only reduce latency. Polling Git
+and SQL on startup and subsequent passes recovers even completely lost wakeups.
+There is no per-write coroutine backlog and no new daemon. The caller must own one
+worker for its local project/root; cross-process root ownership is still a rollout
+obligation, not a distributed worker lease implemented by this slice.
+
+Work samples the latest published head and may coalesce A/B into C. Head changes
+stop an old pass; attempt/target guards reject late acknowledgements. The worker
+records completion only after work returns. Cancellation/process death before that
+point leaves a durable running marker; a new owner repeats the stage safely.
+Context exit cancels and awaits both tasks. SQL transactions do not span embedding
+or Git/file I/O.
+
+`worker.status()` reports the current source SHA plus each stage's distinct target,
+completed and running SHA/error. `caught_up` also checks the active vector policy.
+These are **historical whole-stage completion checkpoints**, not a promise that
+all rows remain on that revision during a newer partial pass. Ordinary V1 readers
+can still mix published revisions; private drafts are not inputs. No general V2
+consistent read endpoint or public progress API is introduced here.
+
+`test-int/test_git_projection_worker_integration.py` proves real API content reads,
+graph relations, full-text results and physical vectors without a manual full-index
+call. It tests A/B/C advancement during blocked vectors, independent vector failure,
+configuration invalidation, preserved editor bytes, cancellation before/after each
+stage and a fresh child interpreter terminating with `os._exit()` after each stage's
+work but before checkpoint acknowledgement. Restart uses the same durable SQLite
+and Git store. Both interpreters use the same deterministic test embedding methods
+and provider identity; this is not an embedding benchmark or power-loss proof.
+
 ## Required before runtime wiring
 
 The first slice is intentionally insufficient for a production switch. Continue
 in this order:
 
-1. Add durable per-project progress for content, graph/full text and vectors, plus
-   a single lifecycle-owned worker with retry/startup catch-up. Recovery must run
-   before accepting a new write based on stale SQL. Catch-up may skip older work
-   where safe; reported progress must describe completed work honestly. Existing
-   post-commit graph/full-text work is still synchronous in this experiment.
-2. Extend guarded projection to moves/deletions and safe adoption/migration of
+1. Extend guarded projection to moves/deletions and safe adoption/migration of
    existing project state. Verify indexing never rewrites canonical Git bytes to
-   match local settings. Complete root binding/registration under runtime ownership.
+   match local settings (the current adapter refuses rewrites). Complete root
+   binding/registration and unique worker ownership under runtime lifecycle control.
+2. Wire the new worker into controlled Git-enabled startup and post-commit paths.
+   Recover SQL content before admitting writes based on it; an up-to-date graph or
+   vector index is not required for admission. Keep all expensive derived work off
+   the write response path. Existing acceptance hooks still perform some synchronous
+   graph/full-text work; that path has not been converted by the new worker slice.
 3. Capture the Git basis before write preparation. Handle cancellation, SQLite
    commit failure after Git publication, concurrent processes and whole-process
    termination at that boundary. Cover move/delete and imports through the same
@@ -179,8 +241,9 @@ are implemented and the isolated boundary tests are extended accordingly.
 
 ## Validation
 
-The isolated suite passes 70 cases; all four Git identity/publication/projection
-modules have 100% executable-line coverage. A further 123 existing write/read/materialization/BM-002/BM-003 regression
+The isolated suite passes 114 cases; all nine Git publication/projection/worker
+modules (including the checkpoint migration) have 100% executable-line coverage.
+A further 123 existing write/read/materialization/BM-002/BM-003 regression
 cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
 is not a clean full-tree type-check result.
@@ -190,11 +253,17 @@ Run from the checkout with its `src` on `PYTHONPATH` and `BASIC_MEMORY_ENV=test`
 ```sh
 python -m pytest tests/repository/test_git_publication.py \
   tests/schemas/test_git_project_manifest.py tests/services/test_git_project_projection.py \
-  test-int/test_git_publication_integration.py -q --no-cov
-ruff check src/basic_memory/{repository,services,schemas}/git*.py \
-  tests/{repository,services,schemas}/test_git*.py test-int/test_git_publication_integration.py
-ty check src/basic_memory/{repository,services,schemas}/git*.py \
-  tests/{repository,services,schemas}/test_git*.py test-int/test_git_publication_integration.py
+  tests/repository/test_git_progress_repository.py tests/test_git_projection_progress_migration.py \
+  tests/test_migration_graph.py test-int/test_git_publication_integration.py \
+  test-int/test_git_projection_worker_integration.py -q --no-cov
+ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
+  src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
+  tests/{repository,services,schemas}/test_git*.py tests/test_git_projection_progress_migration.py \
+  test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
+ty check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
+  src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
+  tests/{repository,services,schemas}/test_git*.py tests/test_git_projection_progress_migration.py \
+  test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
 ```
 
 Use directory-based coverage (`--cov=src/basic_memory/repository`); an earlier

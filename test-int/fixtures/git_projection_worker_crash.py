@@ -1,0 +1,57 @@
+"""Child-process fault boundary for the real Git projection worker tests."""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+from basic_memory.config import BasicMemoryConfig
+from basic_memory.db import DatabaseType, engine_session_factory
+from basic_memory.index.git_projection import GitProjectionPipeline, build_git_projection_pipeline
+from basic_memory.index.git_projection_worker import GitProjectionWorker
+from basic_memory.models import Project
+from basic_memory.repository.git_progress_repository import GitProjectionStage
+from basic_memory.repository.git_project_repository import GitProjectRepository
+from basic_memory.repository.fastembed_provider import FastEmbedEmbeddingProvider
+from basic_memory.repository import semantic_runtime
+from tests.fake_embeddings import _embed_documents, _embed_query
+
+
+async def main() -> None:
+    database, repository, project_id, config_path, fault_stage = sys.argv[1:]
+    config = BasicMemoryConfig.model_validate_json(Path(config_path).read_text())
+    apply = GitProjectionPipeline.apply
+
+    async def crash_after_work(
+        self: GitProjectionPipeline, stage: GitProjectionStage, commit_id: str
+    ) -> None:
+        await apply(self, stage, commit_id)
+        if stage == fault_stage:
+            os._exit(73)
+
+    async with engine_session_factory(Path(database), DatabaseType.FILESYSTEM) as factory:
+        async with factory[1]() as session:
+            project = await session.get(Project, int(project_id))
+            assert project is not None
+        pipeline = build_git_projection_pipeline(
+            GitProjectRepository(Path(repository)),
+            project=project,
+            session_maker=factory[1],
+            app_config=config,
+        )
+        # A new interpreter does not inherit pytest's embedder fixture. Use the
+        # same deterministic provider methods and model identity in both processes.
+        with (
+            patch.object(GitProjectionPipeline, "apply", crash_after_work),
+            patch.object(FastEmbedEmbeddingProvider, "embed_documents", _embed_documents),
+            patch.object(FastEmbedEmbeddingProvider, "embed_query", _embed_query),
+            patch.object(semantic_runtime, "sqlite_vector_runtime_available", return_value=True),
+        ):
+            async with GitProjectionWorker(pipeline, poll_interval=0.02).run():
+                await asyncio.sleep(15)
+        raise RuntimeError("Worker did not reach the process fault boundary")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
