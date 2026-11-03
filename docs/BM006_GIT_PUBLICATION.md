@@ -1,6 +1,6 @@
-# BM-006: isolated Git publication proof
+# BM-006: isolated Git publication and identity recovery
 
-Status: first implementation slice, 2026-11-03. This is experimental code on
+Status: two isolated implementation slices, 2026-11-03. This is experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
 configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
 installation continue to use the existing write path.
@@ -25,9 +25,9 @@ push, timestamp winner or silent rebase is promised.
 `repository/git_project_repository.py` owns a **dedicated bare repository outside every
 indexed note directory**. The normal implementation checkout, editor working files,
 global Git configuration and user index do not participate. Creation refuses an
-existing directory. An initial empty commit establishes the project basis.
+existing directory. An initial commit stores the project UUID and establishes the basis.
 
-1. `prepare(transaction_id, base_commit, files)` builds a full Markdown tree using
+1. `prepare(transaction_id, base_commit, files, note_ids)` builds a full Markdown tree using
    a temporary Git index and immutable blobs. It validates relative note paths and
    retains the candidate under `refs/bm/candidates/<uuid>/<sha>`. Preparation does
    not change the published branch or hold a planning-time lock.
@@ -44,6 +44,51 @@ existing directory. An initial empty commit establishes the project basis.
 5. `snapshot()` reads exact UTF-8 Markdown bytes from a published commit. Candidate
    commits outside published ancestry and non-regular files are rejected. This is
    an internal primitive, not a public V2 consistency API.
+
+## Portable identities and SQL projection
+
+Every tree contains `.basic-memory/project.json`, validated by `schemas/git_project.py`:
+
+```json
+{
+  "format_version": 1,
+  "project_external_id": "11111111-1111-4111-8111-111111111111",
+  "notes": [
+    {"external_id": "22222222-2222-4222-8222-222222222222", "path": "notes/example.md"}
+  ]
+}
+```
+
+The manifest and Markdown publish in the same tree. UUIDs are explicit: missing or
+duplicate identities/paths, unidentified files, reserved control paths and unknown
+manifest versions fail validation. An existing path cannot silently receive a new
+UUID. Canonical JSON ordering prevents a reordered identity list creating an empty
+content change. The manifest contains no host paths, numeric SQL IDs or credentials.
+The old first-slice repositories without a manifest are disposable experimental
+stores; there is no implicit migration/fallback for that format.
+
+`repository/git_projection_repository.py` explicitly registers a clone's project UUID
+with a local root/name. Existing local names/roots or UUIDs bound elsewhere are not
+silently adopted. `services/git_project_projection.py` restores exact `NoteContent`
+under the manifest's note UUIDs, with short per-note SQL transactions and read-cache
+invalidation. Repetition keeps the UUID and content version, while making missing
+or interrupted file materialization retryable. The normal BM guarded materializer
+then writes bytes; it preserves an unexpected editor file and reports conflict.
+
+Existing SQL revisions use version CAS. An earlier absence uses a unique-key INSERT,
+so a concurrently appearing content row cannot be overwritten by an initial-version
+upsert. Existing UUID/path ownership and mirrored content identities are checked.
+SQL bytes outside the target's published history are refused; private candidate
+objects do not count as published history. The check traverses the selected published
+history, not every object in the repository. See [git-rev-list](https://git-scm.com/docs/git-rev-list).
+
+The projector accepts only the current published head and checks it again before
+each per-note write. If Git advances it stops and requires a retry on the latest
+head; it does not finish an older target over newer SQL. A partial pass can leave a
+mixture of published revisions, which V1 permits. It does not acknowledge complete
+project/index progress. Moving existing UUIDs, deleting extra local notes and raw
+imports lacking canonical BM `title`/`type`/`permalink` need explicit reconciliation
+and are refused by this slice.
 
 The one-ref rule matters: Git documents atomic updates of individual refs while
 concurrent readers can observe a subset of a multi-ref update. This implementation
@@ -75,11 +120,19 @@ for entity, observation and relation chunks. Embeddings use the repository's nor
 deterministic test provider; this is a storage/pipeline proof, not a model benchmark.
 
 An interruption after Git publication intentionally rolls back SQLite. The test
-reopens Git, resolves the terminal transaction without a second publication, writes
-only the published snapshot to the isolated project, and uses the **normal project
-index API** to rebuild content, graph and vectors. This demonstrates content
-recoverability. It does not install startup recovery, and it does not yet preserve
-the prepared note's portable external UUID after a complete SQL rollback.
+reopens Git, resolves the terminal transaction without a second publication, restores
+the original UUID/content through the projector, and calls the existing recovery
+materializer. A **full normal project index API** run rebuilds graph/full text and
+vectors. The full index is explicit: file recovery alone can leave matching file
+checksums while graph/search have never been built.
+
+An independent `git clone --bare --no-local` is then registered in a second empty
+SQLite database. Occupied numeric IDs force different local project/entity numbers.
+The normal API still reads the original UUIDs and exact contents; relations resolve
+to the new numeric target IDs, and physical vectors match the expected chunks. This
+proves portable identity/content recovery in the isolated SQLite experiment. The
+clone keeps the original canonical project naming/settings. Automatic lifecycle
+recovery, configuration variation and production migration remain separate work.
 
 Additional cases exercise successful API edits and rejection/SQL rollback when a
 different commit advances the same project's Git basis. Core tests use actual Git
@@ -93,15 +146,14 @@ Git's ref implementation, or prove power-loss/filesystem durability.
 The first slice is intentionally insufficient for a production switch. Continue
 in this order:
 
-1. Add portable project/note UUID metadata committed with the Markdown tree and a
-   projector that restores exactly those identities and canonical bytes. A rebuild
-   must keep external note IDs stable after a post-publication SQL failure and in
-   an independent clone. Paths/titles/numeric SQLite IDs cannot be the identity.
-2. Add durable per-project progress for content, graph/full text and vectors, plus
+1. Add durable per-project progress for content, graph/full text and vectors, plus
    a single lifecycle-owned worker with retry/startup catch-up. Recovery must run
    before accepting a new write based on stale SQL. Catch-up may skip older work
    where safe; reported progress must describe completed work honestly. Existing
    post-commit graph/full-text work is still synchronous in this experiment.
+2. Extend guarded projection to moves/deletions and safe adoption/migration of
+   existing project state. Verify indexing never rewrites canonical Git bytes to
+   match local settings. Complete root binding/registration under runtime ownership.
 3. Capture the Git basis before write preparation. Handle cancellation, SQLite
    commit failure after Git publication, concurrent processes and whole-process
    termination at that boundary. Cover move/delete and imports through the same
@@ -127,8 +179,8 @@ are implemented and the isolated boundary tests are extended accordingly.
 
 ## Validation
 
-The isolated suite passes 34 cases; the new Git module has 134/134 executable lines
-covered. A further 123 existing write/read/materialization/BM-002/BM-003 regression
+The isolated suite passes 70 cases; all four Git identity/publication/projection
+modules have 100% executable-line coverage. A further 123 existing write/read/materialization/BM-002/BM-003 regression
 cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
 is not a clean full-tree type-check result.
@@ -137,11 +189,12 @@ Run from the checkout with its `src` on `PYTHONPATH` and `BASIC_MEMORY_ENV=test`
 
 ```sh
 python -m pytest tests/repository/test_git_publication.py \
+  tests/schemas/test_git_project_manifest.py tests/services/test_git_project_projection.py \
   test-int/test_git_publication_integration.py -q --no-cov
-ruff check src/basic_memory/repository/git_project_repository.py \
-  tests/repository/test_git_publication.py test-int/test_git_publication_integration.py
-ty check src/basic_memory/repository/git_project_repository.py \
-  tests/repository/test_git_publication.py test-int/test_git_publication_integration.py
+ruff check src/basic_memory/{repository,services,schemas}/git*.py \
+  tests/{repository,services,schemas}/test_git*.py test-int/test_git_publication_integration.py
+ty check src/basic_memory/{repository,services,schemas}/git*.py \
+  tests/{repository,services,schemas}/test_git*.py test-int/test_git_publication_integration.py
 ```
 
 Use directory-based coverage (`--cov=src/basic_memory/repository`); an earlier

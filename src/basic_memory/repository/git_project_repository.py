@@ -12,9 +12,17 @@ import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from datetime import UTC, datetime
+from pathlib import Path
 from tempfile import TemporaryDirectory
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from basic_memory.schemas.git_project import (
+    GIT_PROJECT_MANIFEST_PATH,
+    GitNoteIdentity,
+    GitProjectManifest,
+    validate_note_path,
+)
 
 PUBLISHED_REF = "refs/heads/main"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}\Z")
@@ -37,6 +45,7 @@ class GitPublicationConflict(GitPublicationError):
 class GitSnapshot:
     commit_id: str
     files: Mapping[str, str]
+    manifest: GitProjectManifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,21 +63,6 @@ class GitPublication:
     already_committed: bool
 
 
-def validate_note_path(path: str) -> None:
-    """Accept only normalized relative Markdown paths, never Git control files."""
-    parts = path.split("/")
-    if (
-        not path
-        or any(part in {"", ".", ".."} for part in parts)
-        or any(part.casefold() == ".git" for part in parts)
-        or "\\" in path
-        or any(ord(character) < 32 for character in path)
-        or PurePosixPath(path).suffix.casefold() != ".md"
-        or ":" in path
-    ):
-        raise ValueError(f"Not a normalized project Markdown path: {path!r}")
-
-
 def _require_commit_id(commit_id: str) -> None:
     if _COMMIT_ID.fullmatch(commit_id) is None:
         raise ValueError("Expected a full SHA-1 Git commit ID")
@@ -78,7 +72,7 @@ class GitProjectRepository:
     """Own one dedicated bare project repository, independent of working files.
 
     No global Git configuration, hooks, shell, checkout, or user index participates.
-    This first slice stores Markdown only; portable identity metadata comes later.
+    Portable UUIDs live in the same tree as the exact Markdown bytes.
     """
 
     def __init__(self, path: Path) -> None:
@@ -87,7 +81,7 @@ class GitProjectRepository:
             raise ValueError("Git publication requires a dedicated bare project repository")
 
     @classmethod
-    def create(cls, path: Path) -> GitProjectRepository:
+    def create(cls, path: Path, *, project_external_id: UUID | None = None) -> GitProjectRepository:
         # Refuse an existing directory: this primitive must never convert a user's
         # note directory or implementation checkout into a publication repository.
         path.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -101,7 +95,8 @@ class GitProjectRepository:
         if result.returncode != 0:
             raise GitPublicationError(result.stderr.decode("utf-8", errors="replace"))
         repository = cls(path)
-        empty_tree = repository._git("mktree", input_bytes=b"").strip().decode("ascii")
+        manifest = GitProjectManifest(project_external_id=project_external_id or uuid4())
+        empty_tree = repository._write_tree({GIT_PROJECT_MANIFEST_PATH: manifest.canonical_json()})
         initial = (
             repository._git(
                 "commit-tree", empty_tree, input_bytes=b"Initialize Basic Memory project\n"
@@ -183,6 +178,7 @@ class GitProjectRepository:
         self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
         tree = self._git("ls-tree", "-r", "-z", "--full-tree", commit_id)
         files: dict[str, str] = {}
+        manifest: GitProjectManifest | None = None
         for entry in tree.split(b"\0"):
             if not entry:
                 continue
@@ -191,35 +187,41 @@ class GitProjectRepository:
             if mode != b"100644" or kind != b"blob":
                 raise GitPublicationError("Published project contains a non-regular note")
             path = raw_path.decode("utf-8")
+            content = self._git("cat-file", "blob", blob_id.decode("ascii")).decode("utf-8")
+            if path == GIT_PROJECT_MANIFEST_PATH:
+                manifest = GitProjectManifest.model_validate_json(content)
+                continue
             validate_note_path(path)
-            files[path] = self._git("cat-file", "blob", blob_id.decode("ascii")).decode("utf-8")
-        return GitSnapshot(commit_id, files)
+            files[path] = content
+        if manifest is None or set(manifest.note_ids) != set(files):
+            raise GitPublicationError(
+                "Git manifest must identify every published note exactly once"
+            )
+        return GitSnapshot(commit_id, files, manifest)
 
     def prepare(
-        self, *, transaction_id: UUID, base_commit: str, files: Mapping[str, str]
+        self,
+        *,
+        transaction_id: UUID,
+        base_commit: str,
+        files: Mapping[str, str],
+        note_ids: Mapping[str, UUID],
     ) -> PreparedGitPublication:
         """Prepare a complete candidate without publishing bytes or holding a lock."""
         _require_commit_id(base_commit)
-        self._git("merge-base", "--is-ancestor", base_commit, PUBLISHED_REF)
-        for path in files:
-            validate_note_path(path)
-        with TemporaryDirectory(prefix="bm-git-index-") as directory:
-            index_path = Path(directory) / "index"
-            self._git("read-tree", "--empty", index_path=index_path)
-            entries = bytearray()
-            for path, content in sorted(files.items()):
-                blob = self._git(
-                    "hash-object", "-w", "--stdin", input_bytes=content.encode("utf-8")
+        base = self.snapshot(base_commit)
+        if set(note_ids) != set(files):
+            raise ValueError("Every Markdown file requires exactly one explicit note identity")
+        manifest = GitProjectManifest(
+            project_external_id=base.manifest.project_external_id,
+            notes=tuple(GitNoteIdentity(path=path, external_id=note_ids[path]) for path in files),
+        )
+        for path, external_id in base.manifest.note_ids.items():
+            if path in note_ids and note_ids[path] != external_id:
+                raise ValueError(
+                    "An existing note path cannot silently acquire a different identity"
                 )
-                entries.extend(b"100644 " + blob.strip() + b"\t" + path.encode("utf-8") + b"\0")
-            self._git(
-                "update-index",
-                "-z",
-                "--index-info",
-                input_bytes=bytes(entries),
-                index_path=index_path,
-            )
-            tree = self._git("write-tree", index_path=index_path).strip().decode("ascii")
+        tree = self._write_tree({**files, GIT_PROJECT_MANIFEST_PATH: manifest.canonical_json()})
         base_tree = self._git("rev-parse", f"{base_commit}^{{tree}}").strip().decode("ascii")
         changed = tree != base_tree
         commit_id = (
@@ -238,12 +240,45 @@ class GitProjectRepository:
             else base_commit
         )
         candidate_ref = f"refs/bm/candidates/{transaction_id}/{commit_id}"
-        # Keep an interrupted candidate reachable for inspection; it is never read
-        # by normal consumers and is not sent by an ordinary branch push.
         self._git("update-ref", candidate_ref, commit_id)
         return PreparedGitPublication(
             transaction_id, base_commit, commit_id, candidate_ref, changed
         )
+
+    def committed_at(self, commit_id: str) -> datetime:
+        _require_commit_id(commit_id)
+        timestamp = self._git("show", "--no-patch", "--format=%ct", commit_id).strip()
+        return datetime.fromtimestamp(int(timestamp), tz=UTC)
+
+    def contains_published_note_content(self, commit_id: str, path: str, content: str) -> bool:
+        """Recognize an older published file without trusting private object existence."""
+        _require_commit_id(commit_id)
+        validate_note_path(path)
+        self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
+        blob = self._git("hash-object", "--stdin", input_bytes=content.encode("utf-8")).strip()
+        objects = self._git("rev-list", "--objects", "--no-object-names", commit_id, "--", path)
+        return blob in objects.splitlines()
+
+    def _write_tree(self, files: Mapping[str, str]) -> str:
+        """Persist an already validated tree using a private, temporary index."""
+        with TemporaryDirectory(prefix="bm-git-index-") as directory:
+            index_path = Path(directory) / "index"
+            self._git("read-tree", "--empty", index_path=index_path)
+            entries = bytearray()
+            for path, content in sorted(files.items()):
+                blob = self._git(
+                    "hash-object", "-w", "--stdin", input_bytes=content.encode("utf-8")
+                )
+                entries.extend(b"100644 " + blob.strip() + b"\t" + path.encode("utf-8") + b"\0")
+            self._git(
+                "update-index",
+                "-z",
+                "--index-info",
+                input_bytes=bytes(entries),
+                index_path=index_path,
+            )
+            tree = self._git("write-tree", index_path=index_path).strip().decode("ascii")
+        return tree
 
     def publish(self, prepared: PreparedGitPublication) -> GitPublication:
         """Publish through one modified ref, guarded by the fixed project basis."""

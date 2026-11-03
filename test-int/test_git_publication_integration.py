@@ -5,21 +5,32 @@ not runtime configuration or a migration of the local write service.
 """
 
 import asyncio
+import os
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from basic_memory.db import DatabaseType, engine_session_factory
+from basic_memory.deps import get_engine_factory
+from basic_memory.models.base import Base
+from basic_memory.repository.git_projection_repository import register_git_project
+from basic_memory.repository.search_repository import create_search_repository
+from basic_memory.repository.entity_repository import EntityRepository
 
 from basic_memory.index import local_schedulers
 from basic_memory.index.note_content_materialization import (
     LocalNoteContentMaterializationProvider,
     drain_pending_materializations,
+    recover_stuck_materializations,
 )
 from basic_memory.mcp.clients.project import ProjectClient
 from basic_memory.models import Entity, NoteContent, Observation, Project, Relation
@@ -36,6 +47,8 @@ from basic_memory.services.note_content_writes import (
     NoteContentMutationService,
 )
 from basic_memory.services.search_service import SearchService
+from basic_memory.services.file_service import FileService
+from basic_memory.services.git_project_projection import project_git_content
 
 
 @dataclass
@@ -44,6 +57,7 @@ class PublicationExperiment:
     base_commit: str
     fault: Literal["before", "after"] | None = None
     prepared: PreparedGitPublication | None = None
+    note_external_id: str | None = None
 
 
 @pytest.fixture
@@ -51,7 +65,8 @@ def publication(
     tmp_path_factory: pytest.TempPathFactory, test_project: Project, monkeypatch: pytest.MonkeyPatch
 ) -> PublicationExperiment:
     repository = GitProjectRepository.create(
-        tmp_path_factory.mktemp("git-publication") / "project.git"
+        tmp_path_factory.mktemp("git-publication") / "project.git",
+        project_external_id=UUID(test_project.external_id),
     )
     assert not repository.path.is_relative_to(Path(test_project.path))
     experiment = PublicationExperiment(repository, repository.head())
@@ -82,9 +97,14 @@ def publication(
         snapshot = await asyncio.to_thread(repository.snapshot, experiment.base_commit)
         files = {**snapshot.files, payload.file_path: payload.markdown_content}
         prepared = await asyncio.to_thread(
-            repository.prepare, transaction_id=uuid4(), base_commit=snapshot.commit_id, files=files
+            repository.prepare,
+            transaction_id=uuid4(),
+            base_commit=snapshot.commit_id,
+            files=files,
+            note_ids={**snapshot.manifest.note_ids, payload.file_path: UUID(payload.external_id)},
         )
         experiment.prepared = prepared
+        experiment.note_external_id = payload.external_id
         if experiment.fault == "before":
             raise RuntimeError("Interrupted before Git publication")
         result = await asyncio.to_thread(repository.publish, prepared)
@@ -246,18 +266,28 @@ async def test_accept_failure_recovers_published_content_through_real_bm_index(
     replay = reopened.publish(prepared)
     assert replay.already_committed
     assert replay.commit_id == snapshot.commit_id
-    # This is an explicit recovery experiment, not an installed startup worker.
-    # Only published bytes are materialized; pending private candidates stay out.
-    for path, content in snapshot.files.items():
-        target = Path(test_project.path) / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content.encode("utf-8"))
-    await ProjectClient(client).index(test_project.external_id, run_in_background=False)
+    # Restore the committed UUID and exact SQL bytes before reusing BM's real
+    # guarded recovery materializer. No API write or new UUID is replayed here.
+    projected = await project_git_content(
+        reopened, project_id=test_project.id, session_maker=session_maker
+    )
+    assert projected.notes_changed == 1
+    recovered = await recover_stuck_materializations(
+        session_maker=session_maker,
+        file_service=FileService(Path(test_project.path)),
+        project_id=test_project.id,
+    )
+    assert recovered.written == 1
+    await ProjectClient(client).index(
+        test_project.external_id, force_full=True, run_in_background=False
+    )
     await local_schedulers.drain_background_tasks()
     async with session_maker() as session:
         entity = await session.scalar(select(Entity).where(Entity.project_id == test_project.id))
         assert entity is not None
         external_id, entity_id = entity.external_id, entity.id
+        assert external_id == publication.note_external_id
+    assert snapshot.manifest.project_external_id == UUID(test_project.external_id)
     read = await client.get(
         f"/v2/projects/{test_project.external_id}/knowledge/entities/{external_id}"
     )
@@ -295,6 +325,7 @@ async def test_another_published_commit_rejects_and_rolls_back_a_real_api_edit(
         transaction_id=uuid4(),
         base_commit=original_basis,
         files={**snapshot.files, "other.md": "Another published note"},
+        note_ids={**snapshot.manifest.note_ids, "other.md": uuid4()},
     )
     publication.repository.publish(other)
     # The experiment retains the previously captured basis; the API's SQLite
@@ -309,3 +340,126 @@ async def test_another_published_commit_rejects_and_rolls_back_a_real_api_edit(
     assert publication.repository.snapshot().files[entity["file_path"]] == accepted
     assert (Path(test_project.path) / entity["file_path"]).read_bytes() == accepted.encode()
     assert publication.repository.head() == other.commit_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.getenv("BASIC_MEMORY_TEST_POSTGRES") == "1", reason="Independent SQLite clone proof"
+)
+async def test_fresh_clone_restores_portable_ids_with_different_numeric_sql_ids(
+    client: AsyncClient,
+    app: FastAPI,
+    app_config,
+    test_project: Project,
+    publication: PublicationExperiment,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    base = f"/v2/projects/{test_project.external_id}/knowledge"
+    originals = []
+    for title, body in [
+        ("Target", "Stable target"),
+        ("Source", "# Source\n\n- [fact] Cloneprobe\n\n- relates_to [[Target]]\n"),
+    ]:
+        response = await client.post(
+            base + "/write", json={"note": {"title": title, "directory": "notes", "content": body}}
+        )
+        assert response.status_code == 200, response.text
+        originals.append(response.json()["entity"])
+    target_root = tmp_path_factory.mktemp("independent-git-clone")
+    clone_path = target_root / "project.git"
+    subprocess.run(
+        ["git", "clone", "--bare", "--no-local", str(publication.repository.path), str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+    cloned = GitProjectRepository(clone_path)
+    snapshot = cloned.snapshot()
+    project_root = target_root / "notes"
+    project_root.mkdir()
+    previous_overrides = dict(app.dependency_overrides)
+    try:
+        async with engine_session_factory(
+            target_root / "clone.db", DatabaseType.FILESYSTEM
+        ) as factory:
+            engine, session_maker = factory
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+                await connection.execute(text("DROP TABLE IF EXISTS search_index"))
+            async with session_maker() as session, session.begin():
+                dummy = Project(
+                    id=100, name="occupied", path=str(target_root / "occupied"), is_active=True
+                )
+                session.add(dummy)
+                await session.flush()
+                session.add(
+                    Entity(
+                        id=100,
+                        project_id=dummy.id,
+                        title="Occupied",
+                        note_type="note",
+                        content_type="text/markdown",
+                        file_path="occupied.md",
+                    )
+                )
+                await session.flush()
+                restored_project = await register_git_project(
+                    session, snapshot.manifest, name=test_project.name, path=project_root
+                )
+                project_id = restored_project.id
+                assert project_id != test_project.id
+            search_repository = create_search_repository(
+                session_maker, project_id=project_id, app_config=app_config
+            )
+            await search_repository.init_search_index()
+            projected = await project_git_content(
+                cloned, project_id=project_id, session_maker=session_maker
+            )
+            assert projected.notes_changed == projected.notes_total == 2
+            recovered = await recover_stuck_materializations(
+                session_maker=session_maker,
+                file_service=FileService(project_root),
+                project_id=project_id,
+            )
+            assert recovered.written == 2
+            app.dependency_overrides[get_engine_factory] = lambda: factory
+            await ProjectClient(client).index(
+                test_project.external_id, force_full=True, run_in_background=False
+            )
+            await local_schedulers.drain_background_tasks()
+            for original in originals:
+                read = await client.get(base + f"/entities/{original['external_id']}")
+                assert read.status_code == 200, read.text
+                assert read.json()["external_id"] == original["external_id"]
+                assert read.json()["id"] != original["id"]
+                assert read.json()["content"] == original["content"]
+                assert (project_root / original["file_path"]).read_bytes() == original[
+                    "content"
+                ].encode()
+            local_search = SearchService(
+                search_repository,
+                EntityRepository(project_id),
+                FileService(project_root),
+                session_maker=session_maker,
+            )
+            async with session_maker() as session:
+                source = await session.scalar(
+                    select(Entity).where(Entity.external_id == originals[1]["external_id"])
+                )
+                assert source is not None
+                source_id = source.id
+                relation = await session.scalar(
+                    select(Relation).where(Relation.from_id == source_id)
+                )
+                assert relation is not None
+                target_id = await session.scalar(
+                    select(Entity.id).where(Entity.external_id == originals[0]["external_id"])
+                )
+                assert relation.to_id == target_id
+            await assert_indexed_vectors(local_search, source_id, relation_count=1)
+            repeated = await project_git_content(
+                cloned, project_id=project_id, session_maker=session_maker
+            )
+            assert repeated.notes_changed == 0
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
