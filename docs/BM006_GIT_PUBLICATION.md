@@ -277,9 +277,9 @@ in this order:
 2. Select the opt-in executor in controlled API/MCP lifespans/dependencies, expose
    honest public progress and reject remaining import/index/directory bypasses.
    Startup content recovery and the post-commit worker are isolated below; default
-   dependencies still do not enable them. Core accepted-note runners still assemble
-   relation generations and persist some observation/section state inside acceptance;
-   finish moving that derived persistence before claiming fully asynchronous acceptance.
+   dependencies still do not enable them. Core runners prepare typed graph data and
+   a pending-generation marker before commit; graph/FTS publication is already
+   deferred on this path. Review the remaining synchronous delete cleanup separately.
 3. Preserve the captured Git basis before preparation and its verified cancellation,
    SQLite failure and whole-ASGI-process recovery behavior when wiring the host.
    Create/update/edit/move/delete are covered by the isolated executor; imports and
@@ -351,8 +351,12 @@ Create, update, append/edit, move and delete prepare through the normal BM core.
 Git publication precedes SQL commit; old-file permissions survive successful SQL
 move/delete even after the old entity is gone. The returned change suppresses legacy
 materialization/cleanup and the service skips its legacy post-commit graph/FTS work.
-The lifecycle worker performs files/graph/FTS/vectors. Core pre-commit derived writes
-remain a separate performance/integration obligation as described above.
+The lifecycle worker performs files/graph/FTS/vectors. Canonical normalization and
+validation, typed graph preparation and a pending-generation marker remain inside
+acceptance; they do not publish observation/relation/FTS rows. The blocked-worker
+API test verifies those rows and vector manifests are still absent at response time.
+Existing delete runners still remove search/vector state in their SQL transaction;
+review that cleanup separately before productive host integration.
 
 A changed Git basis returns a distinct HTTP 409 publication conflict, including base
 and actual source commits. It must not be converted by `write_note()` into an

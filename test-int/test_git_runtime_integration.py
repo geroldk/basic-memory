@@ -23,7 +23,7 @@ from basic_memory.indexing.accepted_note_mutation_runner import (
     AcceptedNoteMutationDependencies,
     AcceptedNoteMutationMovePolicy,
 )
-from basic_memory.models import Entity, NoteContent, Project, Relation
+from basic_memory.models import Entity, NoteContent, Observation, Project, Relation
 from basic_memory.repository.accepted_note_repositories import AcceptedNoteRepositories
 from basic_memory.repository.git_project_repository import GitProjectRepository
 from basic_memory.repository.git_projection_repository import GitProjectionConflict
@@ -127,7 +127,7 @@ async def test_api_returns_during_blocked_graph_and_vectors(runtime, client, mon
                     "note": {
                         "title": "Runtime",
                         "directory": "notes",
-                        "content": "- [fact] Runtimeprobe\n",
+                        "content": "- [fact] Runtimeprobe\n\n- relates_to [[Target]]\n",
                     }
                 },
             ),
@@ -137,6 +137,15 @@ async def test_api_returns_during_blocked_graph_and_vectors(runtime, client, mon
         note = response.json()["entity"]
         assert not release.is_set()
         assert runtime.pipeline.repository.snapshot().files[note["file_path"]] == note["content"]
+        async with runtime.pipeline.session_maker() as session:
+            assert await session.scalar(select(Observation.id)) is None
+            assert await session.scalar(select(Relation.id)) is None
+        assert not await runtime.pipeline.search_service.repository.get_entity_search_rows(
+            note["id"]
+        )
+        assert not await runtime.pipeline.search_service.repository.get_entity_chunk_manifest(
+            note["id"]
+        )
         assert not (await runtime.worker.status()).caught_up
         release.set()
         await wait_ready(runtime)
