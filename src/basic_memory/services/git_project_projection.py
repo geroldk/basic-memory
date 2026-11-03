@@ -10,16 +10,21 @@ import asyncio
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from basic_memory.file_utils import ParseError, compute_checksum, parse_frontmatter
 from basic_memory.markdown.entity_parser import EntityParser
+from basic_memory.models import Entity
 from basic_memory.read_cache import ReadCacheInvalidator, invalidate_cache
 from basic_memory.repository.entity_repository import AcceptedPendingEntityWrite
 from basic_memory.repository.git_project_repository import GitProjectRepository
+from basic_memory.repository.git_layout_repository import GitLayoutRepository, GitPreparedNote
 from basic_memory.repository.git_projection_repository import (
     GitProjectionConflict,
+    GitProjectionContentBasis,
     GitProjectionRepository,
 )
 
@@ -29,6 +34,8 @@ class GitContentProjection:
     commit_id: str
     notes_total: int
     notes_changed: int
+    notes_moved: int = 0
+    notes_removed: int = 0
 
 
 async def project_git_content(
@@ -48,28 +55,63 @@ async def project_git_content(
     if snapshot.commit_id != await asyncio.to_thread(repository.head):
         raise GitProjectionConflict("Projection requires the current published Git head")
     projection = GitProjectionRepository(project_id)
+    layout = GitLayoutRepository(project_id)
     async with session_maker() as session:
         project = await projection.validate_project(session, snapshot.manifest)
         root = Path(project.path).resolve()
-        bases = {
-            note.path: await projection.read_basis(session, note.external_id, note.path)
-            for note in snapshot.manifest.notes
-        }
+        local_notes = await layout.local_notes(session)
+        foreign = await session.scalar(
+            select(Entity.id)
+            .where(
+                Entity.external_id.in_([str(note.external_id) for note in snapshot.manifest.notes]),
+                Entity.project_id != project_id,
+            )
+            .limit(1)
+        )
+        if foreign is not None:
+            raise GitProjectionConflict("Note UUID is already owned by another project or path")
     if repository.path.is_relative_to(root) or root.is_relative_to(repository.path):
         raise GitProjectionConflict(
             "Internal Git repository must be outside the indexed project root"
         )
     observed_at = await asyncio.to_thread(repository.committed_at, snapshot.commit_id)
     parser = EntityParser(root)
-    prepared: list[tuple[AcceptedPendingEntityWrite, str, str]] = []
+    desired_paths = {note.external_id: note.path for note in snapshot.manifest.notes}
+    local_by_uuid = {note.external_id: note for note in local_notes}
+    for local in local_notes:
+        if desired_paths.get(local.external_id) != local.file_path:
+            if (
+                local.content is None
+                or local.content.checksum != await compute_checksum(local.content.markdown_content)
+                or not await asyncio.to_thread(
+                    repository.contains_published_note_identity,
+                    snapshot.commit_id,
+                    local.external_id,
+                    local.file_path,
+                    local.content.markdown_content,
+                )
+            ):
+                raise GitProjectionConflict(
+                    "Local notes outside this snapshot or a note path is already owned "
+                    "without proven published ancestry"
+                )
+    prepared: dict[UUID, GitPreparedNote] = {}
+    bases: dict[UUID, GitProjectionContentBasis | None] = {}
     for note in snapshot.manifest.notes:
         content = snapshot.files[note.path]
-        basis = bases[note.path]
-        if basis is not None and not await asyncio.to_thread(
-            repository.contains_published_note_content,
-            snapshot.commit_id,
-            note.path,
-            basis.markdown_content,
+        local = local_by_uuid.get(note.external_id)
+        basis = local.content if local is not None else None
+        bases[note.external_id] = basis
+        if (
+            basis is not None
+            and basis.markdown_content != content
+            and not await asyncio.to_thread(
+                repository.contains_published_note_identity,
+                snapshot.commit_id,
+                note.external_id,
+                local.file_path if local is not None else note.path,
+                basis.markdown_content,
+            )
         ):
             raise GitProjectionConflict(
                 "Local SQL contains bytes outside the target's published history"
@@ -109,7 +151,9 @@ async def project_git_content(
             last_updated_by=None,
             external_id=str(note.external_id),
         )
-        prepared.append((fields, content, await compute_checksum(content)))
+        prepared[note.external_id] = GitPreparedNote(
+            fields, content, await compute_checksum(content)
+        )
     changed = 0
     invalidation = (
         invalidate_cache(read_cache, str(snapshot.manifest.project_external_id))
@@ -117,21 +161,40 @@ async def project_git_content(
         else nullcontext()
     )
     async with invalidation:
-        for note, (fields, content, checksum) in zip(
-            snapshot.manifest.notes, prepared, strict=True
-        ):
+        if snapshot.commit_id != await asyncio.to_thread(repository.head):
+            raise GitProjectionConflict(
+                "Published Git head advanced during projection; retry latest"
+            )
+        async with session_maker() as session, session.begin():
+            moved, removed = await layout.apply(session, expected=local_notes, target=prepared)
+        changed += moved
+        for local in local_notes:
+            if (
+                target := prepared.get(local.external_id)
+            ) is not None and local.file_path != target.fields.file_path:
+                assert local.content is not None
+                bases[local.external_id] = GitProjectionContentBasis(
+                    local.entity_id,
+                    local.content.db_version + 1,
+                    target.checksum,
+                    target.content,
+                )
+        for note in snapshot.manifest.notes:
             if snapshot.commit_id != await asyncio.to_thread(repository.head):
                 raise GitProjectionConflict(
                     "Published Git head advanced during projection; retry latest"
                 )
             async with session_maker() as session, session.begin():
+                target = prepared[note.external_id]
                 restored = await projection.restore_note(
                     session,
                     external_id=note.external_id,
-                    fields=fields,
-                    markdown_content=content,
-                    checksum=checksum,
-                    expected=bases[note.path],
+                    fields=target.fields,
+                    markdown_content=target.content,
+                    checksum=target.checksum,
+                    expected=bases[note.external_id],
                 )
             changed += int(restored)
-    return GitContentProjection(snapshot.commit_id, len(snapshot.manifest.notes), changed)
+    return GitContentProjection(
+        snapshot.commit_id, len(snapshot.manifest.notes), changed, moved, removed
+    )

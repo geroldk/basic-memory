@@ -1,6 +1,6 @@
 # BM-006: isolated Git publication, identity recovery and catch-up
 
-Status: three isolated implementation slices, 2026-11-03. This is experimental code on
+Status: four isolated implementation slices, 2026-11-03. This is experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
 configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
 installation continue to use the existing write path.
@@ -62,7 +62,9 @@ Every tree contains `.basic-memory/project.json`, validated by `schemas/git_proj
 The manifest and Markdown publish in the same tree. UUIDs are explicit: missing or
 duplicate identities/paths, unidentified files, reserved control paths and unknown
 manifest versions fail validation. An existing path cannot silently receive a new
-UUID. Canonical JSON ordering prevents a reordered identity list creating an empty
+UUID. An explicit permutation of existing UUIDs supports path swaps; inventing a
+new UUID at an occupied path or replacing a disappearing UUID still requires a
+separate delete publication. Canonical JSON ordering prevents a reordered identity list creating an empty
 content change. The manifest contains no host paths, numeric SQL IDs or credentials.
 The old first-slice repositories without a manifest are disposable experimental
 stores; there is no implicit migration/fallback for that format.
@@ -79,16 +81,52 @@ Existing SQL revisions use version CAS. An earlier absence uses a unique-key INS
 so a concurrently appearing content row cannot be overwritten by an initial-version
 upsert. Existing UUID/path ownership and mirrored content identities are checked.
 SQL bytes outside the target's published history are refused; private candidate
-objects do not count as published history. The check traverses the selected published
-history, not every object in the repository. See [git-rev-list](https://git-scm.com/docs/git-rev-list).
+objects do not count as published history. Adoption now proves the UUID, old path
+and exact bytes belonged together in a published ancestor. The check traverses
+the selected published history, not every object in the repository.
+See [git-rev-list](https://git-scm.com/docs/git-rev-list).
 
 The projector accepts only the current published head and checks it again before
 each per-note write. If Git advances it stops and requires a retry on the latest
 head; it does not finish an older target over newer SQL. A partial pass can leave a
 mixture of published revisions, which V1 permits. It does not acknowledge complete
-project/index progress. Moving existing UUIDs, deleting extra local notes and raw
-imports lacking canonical BM `title`/`type`/`permalink` need explicit reconciliation
-and are refused by this slice.
+project/index progress. Proven moves/deletions are reconciled as described below.
+Unproven local notes and raw imports lacking canonical BM `title`/`type`/`permalink`
+still require controlled preparation and are refused.
+
+## Guarded moves, deletions and old-file cleanup
+
+`repository/git_layout_repository.py` records all local note identities/content in
+an immutable basis. Target notes are parsed/validated before changing that layout.
+A short SQL transaction compares the basis again, claims moved/deleted NoteContent
+using version/checksum CAS, and records durable old-file retirement permissions.
+No Git or file I/O runs inside that transaction. Moved notes keep their UUID and
+numeric ID; advancing the content version fences older materialization requests.
+Their destination file lineage is cleared so it cannot authorize overwriting an
+unrelated destination. SQL-only temporary names permit path/permalink permutations;
+none are committed or materialized. Deleted targets leave incoming relations unresolved.
+
+`models/git_file_retirement.py` and migration `0044` store the old path, permitted
+checksums and retirement attempt UUID independently of the Entity's lifecycle.
+Permissions include proven accepted bytes and known materialized lineage. Repeated
+moves merge older permissions; a stale acknowledgement cannot erase a newer one.
+An inconsistent accepted checksum grants no cleanup permission.
+
+The files stage retires old files before writing destinations, supporting path
+reuse and swaps. It uses BM's existing checksum-guarded storage deletion. A missing
+file is already retired; a reused path containing its exact current Git bytes is
+preserved. Unexpected editor bytes keep the retirement and files progress pending.
+The graph stage purges orphan full-text rows; the vector stage removes stale
+manifest/physical vectors through the normal repository cleanup/reconciliation.
+These guards do not replace the preproduction requirement to control all writers.
+
+`test-int/test_git_layout_integration.py` covers moves, swaps, deletions through an
+empty project, path reuse, coalesced moves and rapid round trips without intervening
+file work. It verifies preserved identities, incoming unresolved relations, FTS and
+physical vector cleanup. Child processes terminate after layout/file work and
+immediately after file deletion but before retirement acknowledgement. Restart
+repeats safely, including when an old file has disappeared or a new file now owns
+its path. Editor conflicts remain visible and preserve the editor's bytes.
 
 The one-ref rule matters: Git documents atomic updates of individual refs while
 concurrent readers can observe a subset of a multi-ref update. This implementation
@@ -175,9 +213,8 @@ graph completion. A slow embedding call cannot block newer content/file/graph
 catch-up. Each lane retries failures with bounded exponential backoff (poll
 interval × up to 64); publication notifications only reduce latency. Polling Git
 and SQL on startup and subsequent passes recovers even completely lost wakeups.
-There is no per-write coroutine backlog and no new daemon. The caller must own one
-worker for its local project/root; cross-process root ownership is still a rollout
-obligation, not a distributed worker lease implemented by this slice.
+There is no per-write coroutine backlog and no new daemon. Local worker ownership
+is now enforced by `index/git_project_ownership.py` before either task starts.
 
 Work samples the latest published head and may coalesce A/B into C. Head changes
 stop an old pass; attempt/target guards reject late acknowledgements. The worker
@@ -202,15 +239,40 @@ work but before checkpoint acknowledgement. Restart uses the same durable SQLite
 and Git store. Both interpreters use the same deterministic test embedding methods
 and provider identity; this is not an embedding benchmark or power-loss proof.
 
+## Local root binding and exclusive ownership
+
+The worker validates the project UUID/root against SQL and the Git manifest, and
+rejects overlapping registered project roots or a bare repository inside an indexed
+root. `filelock` provides two nonblocking OS ownership locks: one at the note root
+and one at the bare repository. A second object or process cannot run the same
+projection; another project can proceed independently. These are local filesystem
+ownership locks, not long-held Git/SQL locks for an agent transaction.
+
+Local-only binding metadata lives at `<root>/.basic-memory/git-binding.json` and
+`<bare-repo>/bm-local-binding.json`; neither belongs to the published tree or an
+ordinary Git clone/push. The paired markers bind project UUID, canonical root and
+repository path. Both are checked before creating either. Interrupted first creation
+can repair a missing matching marker; differing bindings require controlled remapping.
+Control metadata symlinks are refused. SQL registration is rechecked for status,
+each worker pass and each stage, so a live root change does not silently continue.
+
+Context exit waits for the worker tasks and releases the locks. Process death also
+releases the tested local OS locks; lock files remain and must not be unlinked by
+cleanup. The verified environment is local Linux/SQLite. Other filesystem/platform
+semantics and controlled root remapping still need their own operational validation.
+This ownership does not prevent a legacy API, watcher or Cloud importer from writing;
+controlling those sources remains mandatory before production enablement.
+
 ## Required before runtime wiring
 
 The first slice is intentionally insufficient for a production switch. Continue
 in this order:
 
-1. Extend guarded projection to moves/deletions and safe adoption/migration of
-   existing project state. Verify indexing never rewrites canonical Git bytes to
-   match local settings (the current adapter refuses rewrites). Complete root
-   binding/registration and unique worker ownership under runtime lifecycle control.
+1. Add controlled first import/migration of existing project state. Proven Git
+   moves/deletions and local root/worker binding are implemented; unproven local
+   notes remain protected. Define controlled root remapping. Index rewrites are
+   refused; automatic normalization adaptation is not implemented. Measure the
+   current whole-stage rebuild/catch-up cost before enabling it for real projects.
 2. Wire the new worker into controlled Git-enabled startup and post-commit paths.
    Recover SQL content before admitting writes based on it; an up-to-date graph or
    vector index is not required for admission. Keep all expensive derived work off
@@ -241,8 +303,8 @@ are implemented and the isolated boundary tests are extended accordingly.
 
 ## Validation
 
-The isolated suite passes 114 cases; all nine Git publication/projection/worker
-modules (including the checkpoint migration) have 100% executable-line coverage.
+The isolated suite passes 152 cases; all 13 Git publication/projection/worker
+modules (including both migrations) have 838/838 executable lines covered.
 A further 123 existing write/read/materialization/BM-002/BM-003 regression
 cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
@@ -255,14 +317,20 @@ python -m pytest tests/repository/test_git_publication.py \
   tests/schemas/test_git_project_manifest.py tests/services/test_git_project_projection.py \
   tests/repository/test_git_progress_repository.py tests/test_git_projection_progress_migration.py \
   tests/test_migration_graph.py test-int/test_git_publication_integration.py \
+  tests/repository/test_git_layout_repository.py tests/index/test_git_project_ownership.py \
+  tests/test_git_file_retirement_migration.py test-int/test_git_layout_integration.py \
   test-int/test_git_projection_worker_integration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
-  tests/{repository,services,schemas}/test_git*.py tests/test_git_projection_progress_migration.py \
+  src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
+  tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
+  tests/test_git_file_retirement_migration.py \
   test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
 ty check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
-  tests/{repository,services,schemas}/test_git*.py tests/test_git_projection_progress_migration.py \
+  src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
+  tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
+  tests/test_git_file_retirement_migration.py \
   test-int/test_git*.py test-int/fixtures/git_projection_worker_crash.py
 ```
 

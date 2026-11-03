@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from basic_memory.config import BasicMemoryConfig
 from basic_memory.file_utils import compute_checksum
 from basic_memory.index.local_dependencies import build_local_markdown_file_indexer
-from basic_memory.index.note_content_materialization import run_recovery_materialization
+from basic_memory.index.git_project_ownership import require_registered_git_root
+from basic_memory.index.note_content_materialization import (
+    LocalNoteContentStorage,
+    run_recovery_materialization,
+)
 from basic_memory.indexing.batch_indexer import BatchIndexer
 from basic_memory.indexing.index_file_runner import IndexFileExecutor
 from basic_memory.indexing.models import IndexFrontmatterUpdate, IndexFrontmatterWriteResult
@@ -25,6 +29,7 @@ from basic_memory.models import Entity, NoteContent, Project
 from basic_memory.read_cache import ReadCacheInvalidator, invalidate_cache
 from basic_memory.repository import EntityRepository, ObservationRepository, RelationRepository
 from basic_memory.repository.git_progress_repository import GitProjectionStage
+from basic_memory.repository.git_layout_repository import GitLayoutRepository
 from basic_memory.repository.git_project_repository import GitProjectRepository, GitSnapshot
 from basic_memory.repository.git_projection_repository import GitProjectionConflict
 from basic_memory.repository.search_repository import create_search_repository
@@ -32,6 +37,7 @@ from basic_memory.runtime.note_content import (
     RuntimeNoteMaterializationJobRequest,
     RuntimeNoteMaterializationStatus,
 )
+from basic_memory.runtime.cleanup import RuntimeGuardedFileDeleteOutcome
 from basic_memory.services import EntityService, FileService
 from basic_memory.services.git_project_projection import project_git_content
 from basic_memory.services.link_resolver import LinkResolver
@@ -60,6 +66,7 @@ class GitProjectionPipeline:
     read_cache: ReadCacheInvalidator | None = None
 
     async def apply(self, stage: GitProjectionStage, commit_id: str) -> None:
+        await self.require_registration()
         if stage == "content":
             await project_git_content(
                 self.repository,
@@ -77,6 +84,8 @@ class GitProjectionPipeline:
             else nullcontext()
         )
         async with invalidation:
+            if stage == "files":
+                await self.retire_old_files(snapshot)
             if stage == "vectors" and not await self.search_service.semantic_effectively_enabled():
                 # A missing backend must remain visible as unavailable, never "ready".
                 raise GitProjectionConflict("Semantic backend unavailable; vectors remain pending")
@@ -139,11 +148,52 @@ class GitProjectionPipeline:
                         raise GitProjectionConflict(
                             "Vector sync incomplete: " + "; ".join(vectors.sample_errors)
                         )
+            if stage == "graph":
+                await self.search_service.repository.purge_stale_search_rows()
+            elif stage == "vectors":
+                await self.search_service.repository.delete_stale_vector_rows()
+                await self.search_service.repository.reconcile_vector_index()
         await self.require_head(commit_id)
+
+    async def retire_old_files(self, snapshot: GitSnapshot) -> None:
+        """Remove only proven older bytes; a private editor file blocks completion."""
+        retirements = GitLayoutRepository(self.project_id)
+        async with self.session_maker() as session:
+            pending = await retirements.retirements(session)
+        storage = LocalNoteContentStorage(self.file_service)
+        for retirement in pending:
+            await self.require_head(snapshot.commit_id)
+            path = retirement.file_path
+            if await storage.exists(path):
+                checksum = await storage.compute_checksum(path)
+                desired = snapshot.files.get(path)
+                if desired is not None and checksum == await compute_checksum(desired):
+                    # The path was reused and already holds the new published note.
+                    # Its current bytes supersede this older retirement permission.
+                    pass
+                elif checksum in retirement.expected_checksums:
+                    deleted = await storage.delete_file_if_matches(path, expected_checksum=checksum)
+                    if deleted is RuntimeGuardedFileDeleteOutcome.changed:
+                        raise GitProjectionConflict("Old file changed during guarded Git cleanup")
+                else:
+                    raise GitProjectionConflict(
+                        "Old published path contains an unpublished editor change"
+                    )
+            async with self.session_maker() as session, session.begin():
+                await retirements.complete_retirement(session, retirement)
 
     async def require_head(self, commit_id: str) -> None:
         if commit_id != await asyncio.to_thread(self.repository.head):
             raise GitProjectionConflict("Git head advanced; retry the latest published target")
+
+    async def require_registration(self) -> None:
+        async with self.session_maker() as session:
+            await require_registered_git_root(
+                session,
+                project_id=self.project_id,
+                project_external_id=self.project_external_id,
+                root=self.file_service.base_path,
+            )
 
     async def require_file(self, snapshot: GitSnapshot, path: str) -> None:
         actual = await self.file_service.read_file_bytes(path)

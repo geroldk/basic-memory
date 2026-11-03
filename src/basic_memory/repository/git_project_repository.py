@@ -218,9 +218,16 @@ class GitProjectRepository:
         )
         for path, external_id in base.manifest.note_ids.items():
             if path in note_ids and note_ids[path] != external_id:
-                raise ValueError(
-                    "An existing note path cannot silently acquire a different identity"
-                )
+                # An explicit permutation of existing UUIDs is a move/path swap.
+                # Replacing a disappearing UUID or inventing a new owner at an
+                # occupied path still requires a separate delete publication.
+                if (
+                    external_id not in note_ids.values()
+                    or note_ids[path] not in base.manifest.note_ids.values()
+                ):
+                    raise ValueError(
+                        "An existing note path cannot silently acquire a different identity"
+                    )
         tree = self._write_tree({**files, GIT_PROJECT_MANIFEST_PATH: manifest.canonical_json()})
         base_tree = self._git("rev-parse", f"{base_commit}^{{tree}}").strip().decode("ascii")
         changed = tree != base_tree
@@ -258,6 +265,28 @@ class GitProjectRepository:
         blob = self._git("hash-object", "--stdin", input_bytes=content.encode("utf-8")).strip()
         objects = self._git("rev-list", "--objects", "--no-object-names", commit_id, "--", path)
         return blob in objects.splitlines()
+
+    def contains_published_note_identity(
+        self, commit_id: str, external_id: UUID, path: str, content: str
+    ) -> bool:
+        """Prove UUID, old path and bytes belonged together in published ancestry."""
+        _require_commit_id(commit_id)
+        validate_note_path(path)
+        self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
+        commits = (
+            self._git("rev-list", commit_id, "--", path, GIT_PROJECT_MANIFEST_PATH)
+            .decode("ascii")
+            .splitlines()
+        )
+        for ancestor in commits:
+            manifest = GitProjectManifest.model_validate_json(
+                self._git("show", f"{ancestor}:{GIT_PROJECT_MANIFEST_PATH}")
+            )
+            if manifest.note_ids.get(path) == external_id and self._git(
+                "show", f"{ancestor}:{path}"
+            ) == content.encode("utf-8"):
+                return True
+        return False
 
     def _write_tree(self, files: Mapping[str, str]) -> str:
         """Persist an already validated tree using a private, temporary index."""

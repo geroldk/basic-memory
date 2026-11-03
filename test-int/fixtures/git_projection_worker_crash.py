@@ -13,6 +13,8 @@ from basic_memory.index.git_projection_worker import GitProjectionWorker
 from basic_memory.models import Project
 from basic_memory.repository.git_progress_repository import GitProjectionStage
 from basic_memory.repository.git_project_repository import GitProjectRepository
+from basic_memory.repository.git_layout_repository import GitLayoutRepository, GitRetiredFile
+from sqlalchemy.ext.asyncio import AsyncSession
 from basic_memory.repository.fastembed_provider import FastEmbedEmbeddingProvider
 from basic_memory.repository import semantic_runtime
 from tests.fake_embeddings import _embed_documents, _embed_query
@@ -30,6 +32,15 @@ async def main() -> None:
         if stage == fault_stage:
             os._exit(73)
 
+    complete_retirement = GitLayoutRepository.complete_retirement
+
+    async def crash_before_retirement_ack(
+        self: GitLayoutRepository, session: AsyncSession, retirement: GitRetiredFile
+    ) -> None:
+        if fault_stage == "retirement":
+            os._exit(76)
+        await complete_retirement(self, session, retirement)
+
     async with engine_session_factory(Path(database), DatabaseType.FILESYSTEM) as factory:
         async with factory[1]() as session:
             project = await session.get(Project, int(project_id))
@@ -44,6 +55,7 @@ async def main() -> None:
         # same deterministic provider methods and model identity in both processes.
         with (
             patch.object(GitProjectionPipeline, "apply", crash_after_work),
+            patch.object(GitLayoutRepository, "complete_retirement", crash_before_retirement_ack),
             patch.object(FastEmbedEmbeddingProvider, "embed_documents", _embed_documents),
             patch.object(FastEmbedEmbeddingProvider, "embed_query", _embed_query),
             patch.object(semantic_runtime, "sqlite_vector_runtime_available", return_value=True),

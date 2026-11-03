@@ -81,18 +81,6 @@ class GitProjectionRepository:
         project = await session.get(Project, self.project_id)
         if project is None or project.external_id != str(manifest.project_external_id):
             raise GitProjectionConflict("Git snapshot belongs to a different project UUID")
-        identities = {str(note.external_id) for note in manifest.notes}
-        extra = await session.scalar(
-            select(Entity.id)
-            .where(Entity.project_id == self.project_id, Entity.external_id.not_in(identities))
-            .limit(1)
-        )
-        if extra is not None:
-            # Deletion/move recovery needs its own guarded file cleanup. Refuse
-            # adoption rather than silently deleting unrelated local notes here.
-            raise GitProjectionConflict(
-                "Local notes outside this snapshot require explicit reconciliation"
-            )
         return project
 
     async def _find_identity(

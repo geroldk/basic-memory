@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from basic_memory.index.git_projection import GitProjectionPipeline
+from basic_memory.index.git_project_ownership import own_git_project
 from basic_memory.repository.git_progress_repository import (
     GitProgressRepository,
     GitProjectionStage,
@@ -39,7 +40,7 @@ class GitProjectionWorker:
     The context owns both tasks. There is no in-memory job backlog: each pass
     samples the latest Git head and durable checkpoints. Partial failed stages
     are retried as a whole. A crash before acknowledgement safely repeats work.
-    This experimental owner must be unique for its local project/root.
+    Local root/repository bindings and OS locks enforce unique ownership.
     """
 
     def __init__(self, pipeline: GitProjectionPipeline, *, poll_interval: float = 5) -> None:
@@ -58,6 +59,7 @@ class GitProjectionWorker:
         self._wake_vectors.set()
 
     async def status(self) -> GitProjectProgress:
+        await self.pipeline.require_registration()
         return GitProjectProgress(
             await asyncio.to_thread(self.pipeline.repository.head),
             await self.progress.read(),
@@ -70,7 +72,16 @@ class GitProjectionWorker:
             raise RuntimeError("Git projection worker is already running")
         self._running = True
         try:
-            async with asyncio.TaskGroup() as group:
+            async with (
+                own_git_project(
+                    self.pipeline.repository,
+                    project_id=self.pipeline.project_id,
+                    project_external_id=self.pipeline.project_external_id,
+                    project_root=self.pipeline.file_service.base_path,
+                    session_maker=self.pipeline.session_maker,
+                ),
+                asyncio.TaskGroup() as group,
+            ):
                 index = group.create_task(self._loop(vectors=False), name="git-projection-index")
                 vectors = group.create_task(self._loop(vectors=True), name="git-projection-vectors")
                 try:
@@ -102,6 +113,7 @@ class GitProjectionWorker:
                 pass
 
     async def _pass(self, *, vectors: bool) -> bool:
+        await self.pipeline.require_registration()
         if not vectors:
             commit_id = await asyncio.to_thread(self.pipeline.repository.head)
             await self.progress.target(commit_id, vector_key=self.pipeline.vector_key)
