@@ -23,7 +23,8 @@ _version_match = re.search(
     re.MULTILINE,
 )
 assert _version_match is not None, "no __version__ in src/basic_memory/__init__.py"
-CURRENT_VERSION = _version_match.group(1)
+# Local fork build metadata has no corresponding release on PyPI.
+CURRENT_VERSION = _version_match.group(1).split("+", 1)[0]
 
 # (plugin hooks dir, plugin-root template variable the harness substitutes)
 PLUGINS = [

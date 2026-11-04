@@ -4,8 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from basic_memory.repository.git_progress_repository import GitProjectionStage
 from basic_memory.schemas.git_sync import GitSyncStatus
+
+type GitProjectionStage = Literal["content", "files", "graph", "vectors"]
 
 
 class GitStageStatus(BaseModel):

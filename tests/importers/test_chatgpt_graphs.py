@@ -44,7 +44,11 @@ def test_chatgpt_import_visits_each_mapping_key_once(tmp_path: Path, cycle: str)
     # event loop or leaving an import worker running after the regression fails.
     result = subprocess.run(
         [sys.executable, "-m", "basic_memory.cli.main", "import", "chatgpt", str(export)],
-        env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+        env={
+            **os.environ,
+            "BASIC_MEMORY_CONFIG_DIR": str(tmp_path / ".basic-memory"),
+            "BASIC_MEMORY_HOME": str(tmp_path / "notes"),
+        },
         capture_output=True,
         text=True,
         timeout=15,

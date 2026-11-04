@@ -8,6 +8,7 @@ from typing import Any, cast
 import logfire
 
 from basic_memory.cli import app as cli_app
+from basic_memory.config import BasicMemoryConfig
 
 
 class FakeContext:
@@ -34,7 +35,9 @@ def test_app_callback_registers_command_operation(monkeypatch) -> None:
     # uvloop policy installer; the helper itself is stubbed below for this
     # telemetry-focused test.
     monkeypatch.setattr(
-        cli_app.CliContainer, "create", staticmethod(lambda: SimpleNamespace(config=object()))
+        cli_app.CliContainer,
+        "create",
+        staticmethod(lambda: SimpleNamespace(config=BasicMemoryConfig())),
     )
     monkeypatch.setattr(cli_app, "set_container", lambda container: None)
     # app_callback installs the uvloop policy for the Postgres backend; stub the
@@ -53,7 +56,8 @@ def test_app_callback_registers_command_operation(monkeypatch) -> None:
     ctx = FakeContext(invoked_subcommand="status")
     cli_app.app_callback(cast(Any, ctx), version=None)
 
-    assert ctx.resources == [resource]
+    assert len(ctx.resources) == 2
+    assert ctx.resources[0] is resource
     assert operations == [
         (
             "cli.command.status",

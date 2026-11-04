@@ -1,8 +1,9 @@
 """bm_project and bm_project_delete: projects and workspaces.
 
 bm_project lists projects (grouped by workspace), creates them, shows what
-changed recently, and reports local Git progress. bm_project_delete removes one; it is its own tool so bm_project
-is never destructive, and it is hidden unless the enable_project_delete setting
+changed recently, reports local Git progress, and explicitly synchronizes Git.
+Synchronization can remove notes when the peer's published history removed them.
+bm_project_delete removes a project; it is hidden unless the enable_project_delete setting
 turns it on (see mcp.server.set_project_delete_visibility).
 
 Each command runs the project tool implementation of the same purpose; these
@@ -51,13 +52,14 @@ Workspace = Annotated[
         "(`name`, `path`, optional `set_default`, `workspace`); recent (what changed "
         "lately in the required `project`: `since`, `items`, paging); status "
         "(local Git publication, indexes and last peer observation); sync "
-        "(explicit peer fetch/push for the required local Git project; divergence stops)."
+        "(explicit peer fetch/push for the required local Git project; may apply note "
+        "deletions from published peer history; divergence stops)."
     ),
     tags={"projects"},
     annotations={
         "title": "Projects",
         "readOnlyHint": False,
-        "destructiveHint": False,
+        "destructiveHint": True,
         "idempotentHint": False,
         "openWorldHint": False,
     },

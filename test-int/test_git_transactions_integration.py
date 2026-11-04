@@ -20,7 +20,7 @@ from basic_memory.index.git_projection import GitProjectionPipeline
 from basic_memory.models import Entity, NoteContent
 from basic_memory.schemas.git_transactions import GitCommittedState
 from basic_memory.schemas.git_transactions import GitTransactionWrite
-from test_git_host_integration import host_setup as host_setup, ready
+from tests.git_host_support import host_setup as host_setup, ready
 
 
 def note(title, text):

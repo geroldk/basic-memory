@@ -11,8 +11,6 @@ import math
 import re
 from typing import Any
 
-from basic_memory.repository.metadata_filters import parse_metadata_path
-
 # find's `--meta` strings translate onto the search API's metadata_filters dict —
 # a subset of the grammar parse_metadata_filters supports (eq, $gt/$gte/$lt/$lte,
 # $in, array-contains-all, $between), nothing more. Word ops need whitespace around
@@ -204,6 +202,8 @@ def parse_meta_predicates(predicates: list[str]) -> dict[str, Any]:
     instead of last-wins. Raises ValueError on any operator outside the
     supported set, and on any key outside the search API's dot-path grammar.
     """
+    from basic_memory.repository.metadata_filters import parse_metadata_path
+
     filters: dict[str, Any] = {}
     for predicate in predicates:
         word = _PREDICATE_WORD_RE.match(predicate.strip())

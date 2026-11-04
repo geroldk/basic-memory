@@ -1,15 +1,14 @@
 """Short transactions for independent, retryable Git projection checkpoints."""
 
 from dataclasses import dataclass
-from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from basic_memory.models import GitProjectionProgress
+from basic_memory.schemas.git_status import GitProjectionStage as GitProjectionStage
 
-type GitProjectionStage = Literal["content", "files", "graph", "vectors"]
 GIT_PROJECTION_STAGES: tuple[GitProjectionStage, ...] = ("content", "files", "graph", "vectors")
 
 

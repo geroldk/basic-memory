@@ -436,6 +436,7 @@ def test_fastembed_provider_reports_runtime_log_attrs():
 
     assert provider.runtime_log_attrs() == {
         "provider_batch_size": 128,
+        "max_tokens": None,
         "threads": 4,
         "configured_parallel": 2,
         "effective_parallel": 2,

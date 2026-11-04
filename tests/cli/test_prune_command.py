@@ -13,7 +13,9 @@ runner = CliRunner()
 
 
 def _configure(monkeypatch, captured: dict[str, object]):
-    app_config = SimpleNamespace(default_project="main", database_backend="sqlite")
+    app_config = SimpleNamespace(
+        default_project="main", database_backend="sqlite", git_repositories={}
+    )
     monkeypatch.setattr("basic_memory.cli.app.init_cli_logging", lambda: None)
     monkeypatch.setattr("basic_memory.cli.app.maybe_show_init_line", lambda *_args: None)
     monkeypatch.setattr("basic_memory.cli.app.maybe_show_cloud_promo", lambda *_args: None)

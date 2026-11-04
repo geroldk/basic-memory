@@ -18,7 +18,7 @@ from basic_memory.repository.git_project_repository import GitProjectRepository
 from basic_memory.repository.git_sync_repository import GitSyncRepository
 from basic_memory.schemas.git_sync import SyncRunning
 
-from test_git_host_integration import host_setup as host_setup, ready
+from tests.git_host_support import host_setup as host_setup, ready
 
 
 def git(*args):

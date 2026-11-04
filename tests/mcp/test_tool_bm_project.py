@@ -31,12 +31,18 @@ async def test_project_delete_is_hidden_by_default():
 
 
 @pytest.mark.asyncio
-async def test_bm_project_is_never_destructive():
+async def test_bm_project_declares_sync_deletions():
     (tool,) = [tool for tool in await mcp.list_tools() if tool.name == "bm_project"]
 
-    assert tool.parameters["properties"]["command"]["enum"] == ["list", "create", "recent"]
+    assert tool.parameters["properties"]["command"]["enum"] == [
+        "list",
+        "create",
+        "recent",
+        "status",
+        "sync",
+    ]
     assert tool.annotations is not None
-    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.destructive_hint is True
 
 
 @pytest.mark.asyncio

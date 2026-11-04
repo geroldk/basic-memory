@@ -26,7 +26,7 @@ runner = CliRunner()
 
 
 def _configure_cli(monkeypatch, captured: list[dict[str, object]]) -> None:
-    app_config = SimpleNamespace()
+    app_config = SimpleNamespace(git_repositories={})
     monkeypatch.setattr("basic_memory.cli.app.init_cli_logging", lambda: None)
     monkeypatch.setattr("basic_memory.cli.app.maybe_show_init_line", lambda *_args: None)
     monkeypatch.setattr("basic_memory.cli.app.maybe_show_cloud_promo", lambda *_args: None)

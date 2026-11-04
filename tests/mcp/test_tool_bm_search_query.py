@@ -7,7 +7,7 @@ bm_search runs every request through.
 """
 
 import importlib
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -245,13 +245,13 @@ async def test_since_filters_by_update_time(client, test_project):
     recent = await search_json(
         query="recent",
         mode="text",
-        since=(datetime.now() - timedelta(hours=1)).isoformat(),
+        since=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
         project=test_project.name,
     )
     future = await search_json(
         query="recent",
         mode="text",
-        since=(datetime.now() + timedelta(days=1)).isoformat(),
+        since=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
         project=test_project.name,
     )
 

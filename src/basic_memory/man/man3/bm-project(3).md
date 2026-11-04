@@ -43,8 +43,9 @@ bm_project(command, name=None, path=None, set_default=False, workspace=None,
   Inspect `last_attempt.kind`: HTTP success can carry `failed` after a transport error.
   `status` includes the same passive synchronization observation. No timer is created.
 
-bm_project never deletes; bm_project_delete does, and only when the server
-enables it.
+Git `sync` can apply note deletions recorded in published peer history; the tool
+declares destructive behavior. `bm_project_delete` removes whole projects and is
+available only when the server enables it.
 
 **Hosted server only.** The hosted Basic Memory Cloud server replaces this
 tool with one that has two more commands and three more parameters. A local

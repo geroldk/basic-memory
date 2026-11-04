@@ -24,7 +24,9 @@ from basic_memory.repository.search_scope import ProjectScope
 from basic_memory.schemas.search import SearchItemType
 
 TITLE = "API Documentation"
-TITLE_BODY = "endpoint response request route " * 50 + " " + "文档"
+# Isolate column weighting from BM25 length normalization. A title weight is a
+# preference, not an unconditional exact-title boost for a much longer note.
+TITLE_BODY = "endpoint response request route " * 3 + " " + "文档"
 MEETING_BODY = "Step 1 update the api documentation and link it from the plan 文档"
 SCRIPT = "文档"
 

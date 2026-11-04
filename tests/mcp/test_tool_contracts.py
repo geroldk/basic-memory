@@ -170,7 +170,7 @@ EXPECTED_TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
     "bm_edit": {"readOnlyHint": False, "destructiveHint": True},
     "bm_move": {"readOnlyHint": False, "destructiveHint": False},
     "bm_delete": {"readOnlyHint": False, "destructiveHint": True},
-    "bm_project": {"readOnlyHint": False, "destructiveHint": False},
+    "bm_project": {"readOnlyHint": False, "destructiveHint": True},
     "bm_schema": {"readOnlyHint": True, "destructiveHint": False},
     "bm_man": {"readOnlyHint": True, "destructiveHint": False},
 }
