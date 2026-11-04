@@ -101,6 +101,11 @@ def app_callback(
     if ctx.invoked_subcommand == "okf":
         return
 
+    # Recovery must work even when the caller's config/database is broken, and
+    # must never initialize or migrate that installation as a side effect.
+    if ctx.invoked_subcommand == "git":
+        return
+
     command_name = ctx.invoked_subcommand or "root"
 
     # Host installation only copies packaged resources. Broken DB/config state

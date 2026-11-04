@@ -63,6 +63,7 @@ from basic_memory.cli.app import app
 import basic_memory.cli.commands.posix  # noqa: F401  (registers cat/grep/ls/find/head/tree)
 import basic_memory.cli.commands.okf  # noqa: F401 (registers OKF commands)
 import basic_memory.cli.commands.man  # noqa: F401  (registers `bm man apropos`)
+import basic_memory.cli.commands.git  # noqa: F401 (registers offline recovery commands)
 
 # Section-1 page name -> `bm` command path. Seven pages resolve directly from the
 # page name (`grep` -> `bm grep`); apropos(1) documents `bm man apropos`, a verb on
@@ -72,6 +73,9 @@ SECTION1_COMMAND_PATHS: Mapping[str, str] = {
     "apropos": "man apropos",
     "okf-export": "okf export",
     "okf-check": "okf check",
+    "git-backup": "git backup",
+    "git-restore": "git restore",
+    "git-finish-restore": "git finish-restore",
 }
 
 

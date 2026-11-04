@@ -159,6 +159,9 @@ NESTED_COMMAND_PATHS = {
     "apropos": ("man", "apropos"),
     "okf-check": ("okf", "check"),
     "okf-export": ("okf", "export"),
+    "git-backup": ("git", "backup"),
+    "git-restore": ("git", "restore"),
+    "git-finish-restore": ("git", "finish-restore"),
 }
 DOCUMENTED_VERBS = {
     "cat",

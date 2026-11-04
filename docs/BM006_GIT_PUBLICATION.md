@@ -1,6 +1,6 @@
 # BM-006: Git publication, recovery and opt-in local hosting
 
-Status: nine implementation slices, 2026-11-04. Experimental code on
+Status: ten implementation slices, 2026-11-04. Experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. API/MCP hosting can now
 select Git through explicit configuration after controlled adoption. The default
 configuration stays on the existing write path. No productive installation or
@@ -107,7 +107,7 @@ Their destination file lineage is cleared so it cannot authorize overwriting an
 unrelated destination. SQL-only temporary names permit path/permalink permutations;
 none are committed or materialized. Deleted targets leave incoming relations unresolved.
 
-`models/git_file_retirement.py` and migration `0044` store the old path, permitted
+`models/git_file_retirement.py` and migration `0045` store the old path, permitted
 checksums and retirement attempt UUID independently of the Entity's lifecycle.
 Permissions include proven accepted bytes and known materialized lineage. Repeated
 moves merge older permissions; a stale acknowledgement cannot erase a newer one.
@@ -137,8 +137,9 @@ See [git-update-ref](https://git-scm.com/docs/git-update-ref).
 The UUID here identifies a terminal publication. It is **not** an idempotency key
 for an implicit API call, append operation, or draft update. General operation
 deduplication remains V2. No-op receipts and retained private candidates are local
-operational state; an ordinary branch push does not transfer them. Their retention,
-backup and restore contract must be completed before a production rollout.
+operational state; an ordinary branch push does not transfer them. Their private-state backup/restore contract is implemented in
+[BM006_BACKUP_RESTORE.md](BM006_BACKUP_RESTORE.md); productive storage and cutover
+still require operational approval.
 
 ## Real BM integration experiment
 
@@ -190,7 +191,7 @@ writer that **rejects frontmatter rewrites** before touching the published file.
 Unsupported local normalization settings therefore leave graph progress pending
 instead of changing Git's bytes. Safe automatic adaptation remains future work.
 
-`models/git_projection_progress.py`, migration `0043` and
+`models/git_projection_progress.py`, migration `0044` and
 `repository/git_progress_repository.py` persist one local row per project and stage:
 
 | Stage | Completion means |
@@ -367,8 +368,9 @@ Remaining implementation and operational obligations include:
    SQLite failure and whole-ASGI-process recovery behavior when wiring the host.
    Create/update/edit/move/delete are covered by the isolated executor; imports and
    bulk/directory operations must use the publisher or be refused before acceptance.
-4. Validate operational backup/restore of private transactions, source pins,
-   caller-held keys and terminal receipts. Measure retained-record maintenance
+4. Use the implemented [offline backup/restore](BM006_BACKUP_RESTORE.md) in the
+   pilot and verify an independent restore with actual pilot changes. Preserve
+   caller-held keys separately. Measure retained-record maintenance
    on the intended transaction history. The explicit API is implemented, but
    branch-only cloning does not restore local operational state.
 5. Validate actual peer access/deployment and clone/restore on both installations,
@@ -465,7 +467,7 @@ power-loss proof. All ordinary tests use deterministic embeddings.
 
 ## Safe body-only graph catch-up
 
-Migration `0045` adds a nullable `reusable_commit` to the local progress rows.
+Migration `0046` adds a nullable `reusable_commit` to the local progress rows.
 Historical completion alone cannot justify skipping unchanged notes: an
 unacknowledged intermediate pass may already have replaced some graph rows.
 The graph attempt atomically claims its observed reusable basis and clears it
@@ -514,58 +516,52 @@ latency measurements. Full initial indexing still visits every note; observed
 differences in that initial run are not a delta-path speedup. SQL content, files
 and vectors account for the remaining whole-project work.
 
+## Offline backup and independent restore
+
+[BM006_BACKUP_RESTORE.md](BM006_BACKUP_RESTORE.md) defines the implemented cold
+backup and independent restore. `bm git backup`, `bm git restore` and
+`bm git finish-restore` preserve all private refs/transactions/receipts, configuration
+and recovery evidence, remap local roots, and rebuild SQL, files, graph/FTS and
+vectors. They do not initialize the caller's database or overwrite an existing
+restore target. Unpublished working files remain outside the restored indexed roots.
+
+## Upstream and migration maintenance
+
+The fork merges upstream instead of rebasing published history. Upstream snapshot
+`26d0a966` adds its own revision 0043. In the merged experimental chain the three
+BM-006 migrations are 0044 (progress), 0045 (retirement) and 0046 (graph basis),
+with exactly one Alembic head. Earlier experimental databases using BM-006's old
+0043–0045 numbering cannot be upgraded through this chain automatically. Use new
+disposable development databases; non-disposable databases require a separate,
+backed-up recovery operation. Never infer schema identity from a numeric revision
+without its matching code history.
+
+Once applied to persistent installations, fork migration IDs must remain stable.
+Future newly imported, unapplied upstream migrations must be assigned the next
+available fork revisions and recorded with their original upstream identity;
+already applied BM migrations must not be renumbered on every merge. Recheck the
+linear graph, upgrade behavior and both parents' regressions at each merge.
+
 ## Validation
 
-The combined suite verifies 359 current Git, host, transaction, sync and API/process cases,
-including 44 new sync cases. All 35 Git core/host/transaction/sync modules (including three
-migrations and the narrow follow-up protocol) have 2177/2177 executable lines
-covered. One statically unreachable exhaustive-match guard remains excluded.
-A further 504 existing write/read/materialization/authorship/BM-002/BM-003,
-routing, lifecycle, configuration and tool-contract regression cases pass;
-85 manual/resource checks also pass.
-Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
-type checking still reports the same 56 diagnostics as the verified baseline; it
-is not a clean full-tree type-check result.
+Use [DEVELOPMENT_ISOLATION.md](DEVELOPMENT_ISOLATION.md) before running development
+code on an installed host. Environment variables alone are insufficient because
+upstream test fixtures clear them. The launcher masks the real default profile,
+makes the host read-only and gives child processes only private writable state.
 
-Run from the checkout with its `src` on `PYTHONPATH` and `BASIC_MEMORY_ENV=test`:
+Acceptance uses the full official SQLite unit and integration recipes with
+`--import-mode=importlib`, including real Redis cache integration, plus the combined
+Git/crash suite, changed-file Ruff/format/type checks, whole-tree typing and Doctor.
+PostgreSQL, model-quality/semantic benchmarks, real peer deployment and power-loss
+behavior require separate evidence. Historical focused test counts in earlier
+slices were partial regression selections, not full-suite acceptance.
 
-```sh
-python -m pytest tests/repository/test_git_publication.py \
-  tests/schemas/test_git_project_manifest.py tests/services/test_git_project_projection.py \
-  tests/repository/test_git_progress_repository.py tests/test_git_projection_progress_migration.py \
-  tests/test_migration_graph.py test-int/test_git_publication_integration.py \
-  tests/repository/test_git_layout_repository.py tests/repository/test_git_cleanup_permissions.py \
-  tests/index/test_git_project_ownership.py \
-  tests/test_git_file_retirement_migration.py test-int/test_git_layout_integration.py \
-  test-int/test_git_projection_worker_integration.py test-int/test_git_adoption_integration.py \
-  test-int/test_git_runtime_integration.py test-int/test_git_graph_delta_integration.py \
-  tests/test_git_graph_basis_migration.py tests/test_git_host_contracts.py \
-  test-int/test_git_host_integration.py tests/repository/test_git_transactions.py \
-  tests/schemas/test_git_transaction_controls.py \
-  test-int/test_git_transactions_integration.py tests/repository/test_git_sync_primitives.py \
-  test-int/test_git_sync_integration.py -q --no-cov
-ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
-  src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
-  src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
-  src/basic_memory/alembic/versions/0045_add_git_graph_reusable_basis.py \
-  tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
-  tests/test_git_file_retirement_migration.py \
-  tests/test_git_graph_basis_migration.py \
-  src/basic_memory/services/note_content_writes.py \
-  test-int/test_git*.py test-int/fixtures/git*crash.py
-ty check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
-  src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
-  src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
-  src/basic_memory/alembic/versions/0045_add_git_graph_reusable_basis.py \
-  tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
-  tests/test_git_file_retirement_migration.py \
-  tests/test_git_graph_basis_migration.py \
-  src/basic_memory/services/note_content_writes.py \
-  test-int/test_git*.py test-int/fixtures/git*crash.py
-```
+Shared real-host fixtures live in `tests/git_host_support.py`. The Git status
+schema no longer imports the SQL repository layer during CLI registration. The
+`bm_project` tool declares destructive behavior because explicit peer sync can
+apply published note deletions; its interface and manual explain that behavior.
 
-Use directory-based coverage (`--cov=src/basic_memory/repository`); an earlier
-experiment with module-based coverage imported the services package too early and
-tripped a Pydantic import-time assertion in the shared development environment.
-Directory-based coverage completed successfully. This is a test-tool interaction,
-not a production fix.
+Use directory-based coverage (`--cov=src/basic_memory`), with the aggregate
+coverage threshold disabled for a focused selection, then inspect coverage for
+changed modules. Module-name coverage can import parent service packages too early
+and trigger a Pydantic initialization assertion.
