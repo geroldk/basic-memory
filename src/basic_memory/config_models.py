@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from uuid import UUID
 from typing import override, TYPE_CHECKING, Any, ClassVar, Dict, Literal, Optional, List
 
 from loguru import logger
@@ -196,6 +197,14 @@ class BasicMemoryConfig(BaseSettings):
     default_project: Optional[str] = Field(
         default=None,
         description="Name of the default project to use. When set, acts as fallback when no project parameter is specified. Set to null to disable automatic project resolution.",
+    )
+    git_repositories: dict[UUID, Path] = Field(
+        default_factory=dict,
+        description=(
+            "Opt-in local Git host: existing project UUID to dedicated absolute bare repository. "
+            "All registered/configured projects must be local and Git-managed. Requires "
+            "completed controlled adoption and exclusion of external legacy writers."
+        ),
     )
 
     # overridden by ~/.basic-memory/config.json

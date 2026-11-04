@@ -17,6 +17,7 @@ from basic_memory.config import (
     ProjectMode,
     has_cloud_credentials,
 )
+from basic_memory.runtime.git_routing import git_local_routing_active
 
 if TYPE_CHECKING:
     # FastAPI is only needed when a request routes through the local ASGI
@@ -59,7 +60,11 @@ _prepared_local_asgi_databases: dict["FastAPI", _PreparedLocalAsgiDatabase] = {}
 
 def _force_local_mode() -> bool:
     """Check if local mode is forced via environment variable."""
-    return os.environ.get("BASIC_MEMORY_FORCE_LOCAL", "").lower() in ("true", "1", "yes")
+    return git_local_routing_active() or os.environ.get("BASIC_MEMORY_FORCE_LOCAL", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
 
 def _force_cloud_mode() -> bool:
@@ -69,7 +74,9 @@ def _force_cloud_mode() -> bool:
 
 def _explicit_routing() -> bool:
     """Check if CLI --local/--cloud flag was explicitly passed."""
-    return os.environ.get("BASIC_MEMORY_EXPLICIT_ROUTING", "").lower() in ("true", "1", "yes")
+    return git_local_routing_active() or os.environ.get(
+        "BASIC_MEMORY_EXPLICIT_ROUTING", ""
+    ).lower() in ("true", "1", "yes")
 
 
 def _build_timeout() -> Timeout:

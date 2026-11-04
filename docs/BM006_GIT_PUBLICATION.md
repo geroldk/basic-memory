@@ -1,9 +1,10 @@
-# BM-006: isolated Git publication, identity recovery and catch-up
+# BM-006: Git publication, recovery and opt-in local hosting
 
-Status: six isolated implementation slices, 2026-11-04. This is experimental code on
-`feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
-configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
-installation continue to use the existing write path.
+Status: seven implementation slices, 2026-11-04. Experimental code on
+`feat/bm006-git-publication`, based on `local/bm003-baseline`. API/MCP hosting can now
+select Git through explicit configuration after controlled adoption. The default
+configuration stays on the existing write path. No productive installation or
+existing project has been switched by this implementation.
 
 ## Binding scope
 
@@ -169,8 +170,9 @@ SQLite database. Occupied numeric IDs force different local project/entity numbe
 The normal API still reads the original UUIDs and exact contents; relations resolve
 to the new numeric target IDs, and physical vectors match the expected chunks. This
 proves portable identity/content recovery in the isolated SQLite experiment. The
-clone keeps the original canonical project naming/settings. Production lifecycle
-wiring, configuration variation and production migration remain separate work.
+clone keeps the original canonical project naming/settings. Normal opt-in lifecycle
+wiring is tested below; configuration variation and productive migration need
+their own controlled validation.
 
 Additional cases exercise successful API edits and rejection/SQL rollback when a
 different commit advances the same project's Git basis. Core tests use actual Git
@@ -182,8 +184,8 @@ Git's ref implementation, or prove power-loss/filesystem durability.
 ## Durable catch-up worker
 
 `index/git_projection.py` explicitly composes the existing BM guarded materializer,
-single-file graph/full-text indexer and `SearchService.sync_entity_vectors`. It
-does not enable them in existing API/MCP/startup dependencies. Indexing uses a
+single-file graph/full-text indexer and `SearchService.sync_entity_vectors`. The
+opt-in host below owns their lifecycle. Indexing uses a
 writer that **rejects frontmatter rewrites** before touching the published file.
 Unsupported local normalization settings therefore leave graph progress pending
 instead of changing Git's bytes. Safe automatic adaptation remains future work.
@@ -227,8 +229,8 @@ or Git/file I/O.
 completed and running SHA/error. `caught_up` also checks the active graph and vector policies.
 These are **historical whole-stage completion checkpoints**, not a promise that
 all rows remain on that revision during a newer partial pass. Ordinary V1 readers
-can still mix published revisions; private drafts are not inputs. No general V2
-consistent read endpoint or public progress API is introduced here.
+can still mix published revisions; private drafts are not inputs. The host exposes
+these checkpoints without adding a general V2 consistent read endpoint.
 
 `test-int/test_git_projection_worker_integration.py` proves real API content reads,
 graph relations, full-text results and physical vectors without a manual full-index
@@ -263,24 +265,87 @@ semantics and controlled root remapping still need their own operational validat
 This ownership does not prevent a legacy API, watcher or Cloud importer from writing;
 controlling those sources remains mandatory before production enablement.
 
-## Required before runtime wiring
+## Opt-in API/MCP host
 
-The first slice is intentionally insufficient for a production switch. Continue
-in this order:
+`index/git_host.py` binds existing SQL project UUIDs to adopted bare repositories.
+The new `git_repositories` configuration is empty by default. For an isolated,
+already adopted project its shape is:
 
-1. Complete controlled first import/migration and host integration. The isolated
+```json
+{
+  "git_repositories": {
+    "11111111-1111-4111-8111-111111111111": "/absolute/private/project.git"
+  }
+}
+```
+
+The UUID must already match both SQL and the published manifest. This setting is
+not an import command. Startup refuses mismatched roots, foreign manifests,
+inactive projects, relative paths, Cloud projects and stateless/Postgres hosting.
+The first supported topology requires **every configured and SQL-registered project
+to be local and Git-managed**. A mixed host is refused because legacy target
+changes could otherwise bypass cross-project graph invalidation. This is a current
+implementation limit, not a requirement that projects share one note repository.
+Two managed projects publish to separate repositories independently.
+
+Normal API and MCP lifespans recover published SQL content before admission and
+own all Git workers through shutdown. Off-lifespan writes fail with HTTP 503;
+they never silently use legacy acceptance. A failed second owner restores the
+first host's container, routing and database connection. Worker tasks finish or
+cancel before their owner's database closes. Configuration reconciliation cannot
+delete unmatched SQL projects before validation.
+
+Normal note create/replace/edit/move/delete dependencies select the Git executor.
+Post-acceptance materialization and relation scheduling notify the owned worker;
+they do not start legacy jobs. API/MCP watchers and direct legacy file-index startup
+are disabled. An API policy refuses unconnected imports, direct index/reindex,
+directory mutations and project-registry mutations before acceptance. File-based
+schema/prompt helpers are also unavailable until they read published content.
+The native CLI refuses unconnected data-changing commands and suppresses automatic
+upstream replacement. Agent tool calls use the normal hosted API/MCP path.
+
+Lifecycle-owned local routing and project discovery remain local even when Cloud
+credentials are present; Git project listings report direct Cloud sync unsupported.
+This controls this host only: external editors, rclone/timers, older installations
+and custom injected client factories still require operator control. The setting
+does not stop any external process or prove the productive cutover prerequisite.
+
+`GET /v2/projects/{project_uuid}/git/status` and
+`bm_project(command="status", project="...")` return the source SHA, separate
+stage targets/completions/running attempts, attempts/errors and `caught_up`.
+The response explicitly describes relaxed reads. It neither starts an index nor
+waits for one, and a completed checkpoint does not pin concurrent readers.
+
+SQLite deletion retains the existing targeted removal of that entity's FTS,
+chunk manifest and physical sqlite-vec rows inside acceptance. There is no model
+inference, project reindex or external vector request in this cleanup. Deferring
+it naively could cascade away the mapping needed to remove physical vectors.
+Tests delete an already indexed note while graph/vectors are blocked: the call
+returns and all three owned search stores are cleared. This is bounded to the
+deleted entity, not a latency guarantee for arbitrarily large notes.
+
+`test-int/test_git_host_integration.py` uses normal lifespans and dependencies,
+including real local-mode scheduling decisions, without injecting a mutation
+executor. It proves ordinary API/MCP publication/read/search/progress, blocked
+index return, startup recovery, topology refusal and independent repositories.
+Deterministic embeddings remain a pipeline test, not a model timing benchmark.
+
+## Remaining before productive use
+
+The next implementation milestone is explicit transactions. Remaining
+implementation and operational obligations include:
+
+1. Complete controlled first import/migration and operational host cutover. The isolated
    adoption primitive below preserves accepted-but-unwritten content, but does not
    stop legacy writers. Unindexed files, resources and noncanonical input remain
    protected. Define controlled root remapping. Index rewrites are refused;
    automatic normalization adaptation is not implemented. The body-only graph
    delta is isolated below; content, files and vectors still require whole-project
    traversal. Assess their measured catch-up cost before a productive pilot.
-2. Select the opt-in executor in controlled API/MCP lifespans/dependencies, expose
-   honest public progress and reject remaining import/index/directory bypasses.
-   Startup content recovery and the post-commit worker are isolated below; default
-   dependencies still do not enable them. Core runners prepare typed graph data and
-   a pending-generation marker before commit; graph/FTS publication is already
-   deferred on this path. Review the remaining synchronous delete cleanup separately.
+2. Extend supported controlled import/bulk/schema/prompt workflows when needed;
+   they are currently refused. Validate packaging, deployment and recovery under
+   the chosen operator configuration. Core runners prepare typed graph data and
+   a pending-generation marker before commit; graph/FTS publication is deferred.
 3. Preserve the captured Git basis before preparation and its verified cancellation,
    SQLite failure and whole-ASGI-process recovery behavior when wiring the host.
    Create/update/edit/move/delete are covered by the isolated executor; imports and
@@ -301,7 +366,7 @@ in this order:
    and routes editor drafts through controlled import. Index drainage is not a
    substitute for write-path control. Migration and rollback retain new Git history.
 
-Do not enable the experimental hook on existing projects before these obligations
+Do not enable the experimental host on existing projects before these obligations
 are implemented and the isolated boundary tests are extended accordingly.
 
 ## Reviewable first adoption
@@ -336,7 +401,7 @@ still reaches the caller; durable Git determines subsequent recovery.
 ## Opt-in startup and real API acceptance
 
 `services/git_project_runtime.py` implements the optional mutation executor accepted
-by `NoteContentMutationService`. Default dependencies do not select it. Its lifecycle
+by `NoteContentMutationService`. Git-configured host dependencies select it. Its lifecycle
 owns the existing Git worker and first restores SQL content before yielding admission;
 it does not wait for files, graph or vectors. The exact restored startup commit is
 retained, rather than incorrectly sampling a potentially newer head afterward.
@@ -356,8 +421,8 @@ The lifecycle worker performs files/graph/FTS/vectors. Canonical normalization a
 validation, typed graph preparation and a pending-generation marker remain inside
 acceptance; they do not publish observation/relation/FTS rows. The blocked-worker
 API test verifies those rows and vector manifests are still absent at response time.
-Existing delete runners still remove search/vector state in their SQL transaction;
-review that cleanup separately before productive host integration.
+Existing delete runners retain the targeted SQLite search/vector cleanup described
+above; expensive catch-up remains owned by the worker.
 
 A changed Git basis returns a distinct HTTP 409 publication conflict, including base
 and actual source commits. It must not be converted by `write_note()` into an
@@ -412,15 +477,16 @@ normalization and workspace prefix. Changing it rebuilds graph and vectors;
 changing only the embedding policy continues to invalidate vectors alone.
 Content, files and vectors still traverse the whole project in this slice.
 Registry renames, external writers and imports must be controlled or routed
-through equivalent invalidation at the future host boundary. During a mixed
-pilot this includes legacy projects referenced by converted projects: changing
-an unmanaged target must not silently bypass invalidation of its Git sources.
+through equivalent invalidation at the host boundary. The current host refuses
+mixed legacy/Git projects and unconnected writers instead of allowing an unmanaged
+target to bypass invalidation of its Git sources.
 
 `test-int/test_git_graph_delta_integration.py` exercises real graph/FTS/vectors,
 a failed intermediate pass, interpreter death after a delta but before its
 checkpoint, deletion before any graph attempt, target recreation and graph policy
 changes. A real API append regression verifies that an unchanged peer note is
-skipped. These are isolated SQLite proofs; normal host selection remains disabled.
+skipped. These are isolated SQLite proofs; opt-in normal host selection is tested
+separately as described above.
 
 On the same private 593-note/5,981,450-byte corpus, one body edit indexed one
 graph source instead of 593. Graph/FTS stage time fell from 184.12 s to 3.23 s;
@@ -433,13 +499,13 @@ and vectors account for the remaining whole-project work.
 
 ## Validation
 
-The isolated suite and supplemental API/process checks verify 215 current cases;
-all 17 Git publication/projection/worker/adoption/runtime modules (including three
-migrations) have 1166/1166 executable lines covered. The main run passes 213 cases;
-three supplemental executions include one already-covered error case and two
-additional cases. One statically unreachable exhaustive-match guard is excluded.
-A further 132 existing write/read/materialization/authorship/BM-002/BM-003 regression
-cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
+The combined suite verifies 261 current Git, host and API/process cases, including
+46 new host contracts/integration cases. All 25 Git/host modules (including three
+migrations and the narrow follow-up protocol) have 1330/1330 executable lines
+covered. One statically unreachable exhaustive-match guard remains excluded.
+A further 488 existing write/read/materialization/authorship/BM-002/BM-003,
+routing, lifecycle, configuration and tool-contract regression cases pass.
+Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
 is not a clean full-tree type-check result.
 
@@ -455,7 +521,8 @@ python -m pytest tests/repository/test_git_publication.py \
   tests/test_git_file_retirement_migration.py test-int/test_git_layout_integration.py \
   test-int/test_git_projection_worker_integration.py test-int/test_git_adoption_integration.py \
   test-int/test_git_runtime_integration.py test-int/test_git_graph_delta_integration.py \
-  tests/test_git_graph_basis_migration.py -q --no-cov
+  tests/test_git_graph_basis_migration.py tests/test_git_host_contracts.py \
+  test-int/test_git_host_integration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \

@@ -3,7 +3,7 @@ title: bm-project(3)
 type: manpage
 section: 3
 name: bm-project
-summary: list, create, and show recent activity in projects
+summary: list, create, and show recent activity or Git progress in projects
 generated: registry
 tool: bm_project
 verified: 0.24.1 mcp
@@ -13,7 +13,7 @@ verified: 0.24.1 mcp
 
 ## NAME
 
-**bm-project** — list, create, and show recent activity in projects
+**bm-project** — list, create, and show recent activity or Git progress in projects
 
 ## SYNOPSIS
 
@@ -33,6 +33,10 @@ bm_project(command, name=None, path=None, set_default=False, workspace=None,
 - `recent` — what changed lately in the required `project`: `since`, `items`, paging. JSON
   output carries `page`, `page_size` and `has_more`, plus `guidance` for any
   project that was never indexed.
+- `status` — local Git publication and index progress for the required `project`.
+  Reports source revision and separate SQL content, file, graph/full-text and
+  vector completion. This observes progress; it does not wait or pin a snapshot.
+  Available on an explicitly configured local Git host.
 
 bm_project never deletes; bm_project_delete does, and only when the server
 enables it.
@@ -42,6 +46,11 @@ at the next project reload. Once the watch is attached, a one-time index pass
 includes files copied in before attachment; later changes use normal file events.
 
 The shell spelling of `recent` is `bm tool project recent`.
+
+The experimental Git host owns all configured local projects and disables the
+legacy watcher, imports, registry edits and directory mutations. External editors
+and Cloud file sync must be controlled before enabling it. Ordinary reads may mix
+published revisions while indexes catch up.
 
 ## PARAMETERS
 

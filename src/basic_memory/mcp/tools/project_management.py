@@ -320,7 +320,7 @@ async def list_memory_projects(
     # Fetch cloud projects from every accessible workspace when credentials are available
     cloud_entries: tuple[WorkspaceProjectEntry, ...] = ()
     config = ConfigManager().config
-    if has_cloud_credentials(config):
+    if not config.git_repositories and has_cloud_credentials(config):
         try:
             workspace_index = await ensure_workspace_project_index(context=context)
             cloud_entries = workspace_index.entries
@@ -336,6 +336,12 @@ async def list_memory_projects(
                 )
 
     merged = _merge_workspace_projects(local_list, cloud_entries, config=config)
+    if config.git_repositories:
+        for project in merged:
+            project["sync_supported"] = False
+            project["sync_reason"] = (
+                "Git publication requires direct Cloud file sync to be stopped."
+            )
     default_project = local_list.default_project
 
     if output_format == "json":

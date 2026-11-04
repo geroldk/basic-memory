@@ -1,7 +1,7 @@
 """bm_project and bm_project_delete: projects and workspaces.
 
-bm_project lists projects (grouped by workspace), creates them, and shows what
-changed recently. bm_project_delete removes one; it is its own tool so bm_project
+bm_project lists projects (grouped by workspace), creates them, shows what
+changed recently, and reports local Git progress. bm_project_delete removes one; it is its own tool so bm_project
 is never destructive, and it is hidden unless the enable_project_delete setting
 turns it on (see mcp.server.set_project_delete_visibility).
 
@@ -32,8 +32,10 @@ from basic_memory.mcp.tools.project_management import (
     list_memory_projects,
 )
 from basic_memory.mcp.tools.recent_activity import RecentRows, recent_activity_page
+from basic_memory.mcp.clients.project import ProjectClient
+from basic_memory.mcp.project_context import get_project_client
 
-type ProjectCommand = Literal["list", "create", "recent"]
+type ProjectCommand = Literal["list", "create", "recent", "status"]
 
 Workspace = Annotated[
     str | None,
@@ -47,7 +49,8 @@ Workspace = Annotated[
     description=(
         "Basic Memory projects. `command`: list (projects, grouped by workspace); create "
         "(`name`, `path`, optional `set_default`, `workspace`); recent (what changed "
-        "lately in the required `project`: `since`, `items`, paging)."
+        "lately in the required `project`: `since`, `items`, paging); status "
+        "(local Git publication and index progress for the required `project`)."
     ),
     tags={"projects"},
     annotations={
@@ -88,8 +91,32 @@ async def bm_project(
     project: OptionalProjectParam = None,
     context: Context | None = None,
 ) -> str | dict[str, Any] | list[dict[str, Any]]:
-    """List or create projects, or show what changed in them."""
+    """List/create projects or report recent changes and local Git progress."""
     match command:
+        case "status":
+            if project is None:
+                raise refusal(
+                    "INVALID_ARGUMENTS", "status needs `project`.", output_format=output_format
+                )
+            project_name, project_id = routing_arguments(parse_project(project))
+            async with get_project_client(project_name, context=context, project_id=project_id) as (
+                client,
+                active_project,
+            ):
+                status = await ProjectClient(client).get_git_status(active_project.external_id)
+            if output_format == "json":
+                return status.model_dump(mode="json")
+            lines = [
+                f"Git: {status.source_commit}",
+                "Indexes caught up" if status.caught_up else "Indexes catching up",
+                "Reads may mix published revisions.",
+            ]
+            for stage in status.stages:
+                completed = stage.completed_commit or "pending"
+                lines.append(f"{stage.stage}: {completed}")
+                if stage.last_error is not None:
+                    lines.append(f"  {stage.last_error}")
+            return "\n".join(lines)
         case "list":
             return await list_memory_projects(output_format=output_format, context=context)
         case "create":

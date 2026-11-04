@@ -14,6 +14,7 @@ from basic_memory.schemas import ProjectIndexStatusResponse, ProjectInfoResponse
 from basic_memory.schemas.project_info import ProjectList, ProjectStatusResponse
 from basic_memory.schemas.v2 import ProjectResolveResponse
 from basic_memory.schemas.doctor import ProjectDoctorReport
+from basic_memory.schemas.git_status import GitProjectStatus
 
 
 class ProjectClient:
@@ -222,6 +223,15 @@ class ProjectClient:
             f"/v2/projects/{project_external_id}/status",
         )
         return ProjectIndexStatusResponse.model_validate(response.json())
+
+    async def get_git_status(self, project_external_id: str) -> GitProjectStatus:
+        """Read published Git and historical index progress without starting work."""
+        from basic_memory.mcp.tools.utils import call_get
+
+        response = await call_get(
+            self.http_client, f"/v2/projects/{project_external_id}/git/status"
+        )
+        return GitProjectStatus.model_validate(response.json())
 
     async def get_doctor_report(self, project_external_id: str) -> ProjectDoctorReport:
         """Report a project's problems and their repairs without changing the project."""

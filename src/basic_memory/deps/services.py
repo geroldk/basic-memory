@@ -19,6 +19,7 @@ from fastapi import Depends, Path as FastAPIPath
 from loguru import logger
 
 from basic_memory.deps.config import AppConfigDep
+from basic_memory.deps.git import GitRuntimeDep
 from basic_memory.deps.db import SessionMakerDep
 from basic_memory.deps.projects import (
     ProjectConfigV2ExternalDep,
@@ -33,6 +34,8 @@ from basic_memory.deps.repositories import (
 )
 from basic_memory.indexing.relation_resolution import RepositoryRelationResolutionRuntime
 from basic_memory.index.note_content_materialization import LocalNoteContentMaterializationProvider
+from basic_memory.index.note_content_provider import NoteContentMaterializationProvider
+from basic_memory.index.git_followups import GitNoteFollowups
 from basic_memory.services.directory_deletes import DirectoryDeleteService
 from basic_memory.services.note_content_reads import NoteContentQueryService
 from basic_memory.services.project_readiness import ProjectReadinessService
@@ -328,8 +331,16 @@ async def get_note_content_mutation_service(
     session_maker: SessionMakerDep,
     app_config: AppConfigDep,
     read_cache: ReadCacheDep,
+    git_runtime: GitRuntimeDep = None,
 ) -> NoteContentMutationService:
     """Create the local accepted-note mutation facade for API routes."""
+    if git_runtime is not None:
+        return NoteContentMutationService(
+            session_maker=session_maker,
+            mutation_dependencies=git_runtime.dependencies,
+            mutation_executor=git_runtime,
+            read_cache=read_cache,
+        )
     accepted_note_repositories = AcceptedNoteRepositories(
         external_vector_cleaner_factory=lambda project_id: create_search_repository(
             session_maker=session_maker,
@@ -481,7 +492,10 @@ async def get_relation_resolution_scheduler(
     search_service: SearchServiceV2ExternalDep,
     app_config: AppConfigDep,
     read_cache: ReadCacheDep,
+    git_runtime: GitRuntimeDep = None,
 ) -> RelationResolutionScheduler:
+    if git_runtime is not None:
+        return GitNoteFollowups(git_runtime)
     # Build the project-scoped resolution runtime. It owns its own sessions via
     # session_maker, so it is safe to run from a detached background task.
     project_id = entity_repository.project_id
@@ -548,7 +562,8 @@ async def get_note_content_materialization_provider(
     app_config: AppConfigDep,
     relation_resolution_scheduler: RelationResolutionSchedulerDep,
     read_cache: ReadCacheDep,
-) -> LocalNoteContentMaterializationProvider:
+    git_runtime: GitRuntimeDep = None,
+) -> NoteContentMaterializationProvider:
     """Create the local materializer for accepted-note route writes.
 
     test_mode keeps materialization inline so tests can assert file/search state
@@ -557,6 +572,8 @@ async def get_note_content_materialization_provider(
     embeds each note after indexing its file, so routes never schedule vector sync
     for accepted note writes (#1732).
     """
+    if git_runtime is not None:
+        return GitNoteFollowups(git_runtime)
     return LocalNoteContentMaterializationProvider(
         session_maker=session_maker,
         file_service=file_service,
@@ -576,7 +593,7 @@ async def get_note_content_materialization_provider(
 
 
 NoteContentMaterializationProviderDep = Annotated[
-    LocalNoteContentMaterializationProvider,
+    NoteContentMaterializationProvider,
     Depends(get_note_content_materialization_provider),
 ]
 

@@ -12,6 +12,7 @@ from basic_memory.cli.auto_update import maybe_run_periodic_auto_update  # noqa:
 from basic_memory.cli.container import CliContainer, set_container  # noqa: E402
 from basic_memory.cli.promo import maybe_show_cloud_promo, maybe_show_init_line  # noqa: E402
 from basic_memory.config import init_cli_logging  # noqa: E402
+from basic_memory.runtime.git_routing import local_git_routing  # noqa: E402
 import logfire  # noqa: E402
 
 
@@ -50,6 +51,25 @@ SKIP_INIT_COMMANDS = frozenset(
         "workspace",
         # POSIX read verbs (#1404): API-hitting commands that initialize via
         # deps.py, same as status/tool.
+        "cat",
+        "grep",
+        "ls",
+        "find",
+        "head",
+        "tree",
+    }
+)
+
+# Other commands can write files, the registry, or SQL outside the publication
+# path. Keep them unavailable until they have an explicit Git implementation.
+GIT_HOST_COMMANDS = frozenset(
+    {
+        "mcp",
+        "tool",
+        "config",
+        "status",
+        "man",
+        "inspect",
         "cat",
         "grep",
         "ls",
@@ -141,6 +161,13 @@ def app_callback(
     container = CliContainer.create()
     set_container(container)
 
+    if container.config.git_repositories and command_name not in GIT_HOST_COMMANDS:
+        typer.echo(
+            "This command is not connected to Git publication. Use the Git MCP/API host.", err=True
+        )
+        raise typer.Exit(2)
+    ctx.with_resource(local_git_routing(bool(container.config.git_repositories)))
+
     # Trigger: Postgres backend resolved at CLI startup, before any asyncio.run().
     # Why: uvloop must own the event-loop policy before the loop is created so the
     # asyncpg engine-dispose race (#831/#877) cannot fire. No-op for SQLite.
@@ -158,6 +185,10 @@ def app_callback(
     # Why: informational/promo/update output belongs below command results.
     # Outcome: command output remains primary, with optional follow-up notices afterwards.
     def _post_command_messages() -> None:
+        if container.config.git_repositories:
+            # An automatic upstream update could replace this experimental
+            # publisher with the legacy writer while the same roots remain bound.
+            return
         maybe_show_cloud_promo(ctx.invoked_subcommand)
         maybe_run_periodic_auto_update(ctx.invoked_subcommand)
 

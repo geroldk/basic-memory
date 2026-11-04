@@ -3,7 +3,7 @@ Basic Memory FastMCP server.
 """
 
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastmcp import FastMCP
 from fastmcp.server.transforms import Visibility
@@ -15,6 +15,7 @@ from basic_memory import db
 from basic_memory.api.container import ApiContainer, installed_container
 from basic_memory.cli.auth import CLIAuth
 from basic_memory.index.note_content_materialization import drain_pending_materializations
+from basic_memory.index.git_host import run_git_host
 from basic_memory.db import scoped_session
 from basic_memory.index.local_schedulers import drain_background_tasks
 from basic_memory.mcp.client_info import MCPClientInfoMiddleware
@@ -24,6 +25,7 @@ from basic_memory.read_cache import ReadCacheUnavailable
 from basic_memory.read_cache.redis import RedisReadCache
 from basic_memory.read_cache.lifecycle import open_redis_read_cache
 from basic_memory.services.initialization import initialize_app
+from basic_memory.runtime.git_routing import local_git_routing
 import logfire
 
 PROJECT_DELETE_TAG = "project-delete"
@@ -111,107 +113,120 @@ async def lifespan(app: FastMCP):
 
     standalone_redis_url = None if container.mode.is_cloud else config.redis_url
 
-    async with open_redis_read_cache(
-        standalone_redis_url,
-        max_connections=config.redis_max_connections,
-    ) as read_cache:
-        container.read_cache = read_cache
-        api_container = ApiContainer(config=config, mode=container.mode, read_cache=read_cache)
+    engine_was_none = db._engine is None
+    try:
+        async with (
+            open_redis_read_cache(
+                standalone_redis_url,
+                max_connections=config.redis_max_connections,
+            ) as read_cache,
+            AsyncExitStack() as git_resources,
+        ):
+            container.read_cache = read_cache
+            api_container = ApiContainer(config=config, mode=container.mode, read_cache=read_cache)
 
-        # Local MCP requests use FastAPI through ASGITransport without entering its lifespan.
-        # Installing the same container keeps request reads and watcher invalidation on one cache.
-        with installed_mcp_container(container), installed_container(api_container):
-            with logfire.span(
-                "mcp.lifecycle.startup",
-                entrypoint="mcp",
-                mode=container.mode.name.lower(),
-                default_project=config.default_project,
+            # Local MCP requests use FastAPI through ASGITransport without entering its lifespan.
+            # Installing the same container keeps request reads and watcher invalidation on one cache.
+            with (
+                installed_mcp_container(container),
+                installed_container(api_container),
+                local_git_routing(bool(config.git_repositories)),
             ):
-                logger.info(f"Starting Basic Memory MCP server (mode={container.mode.name})")
-                logger.info(
-                    f"Config: database_backend={config.database_backend.value}, "
-                    f"default_project={config.default_project}"
-                )
-                logger.info(
-                    f"Semantic search: provider={config.semantic_embedding_provider}, "
-                    f"model={config.semantic_embedding_model}, "
-                    f"dimensions={config.semantic_embedding_dimensions or 'auto'}, "
-                    f"batch_size={config.semantic_embedding_batch_size}, "
-                    f"document_prefix_set={bool(config.semantic_embedding_document_prefix)}, "
-                    f"query_prefix_set={bool(config.semantic_embedding_query_prefix)}"
-                )
-
-                # Log configured projects with their routing mode
-                for name, entry in config.projects.items():
-                    default = " (default)" if name == config.default_project else ""
-                    logger.info(
-                        f"Project: {name} -> {entry.path} [mode={entry.mode.value}]{default}"
-                    )
-
-                # Check cloud auth status (local file check, no network call)
-                auth = CLIAuth(client_id=config.cloud_client_id, authkit_domain=config.cloud_domain)
-                tokens = auth.load_tokens()
-                if tokens is not None:
-                    if not auth.is_token_valid(tokens):
-                        expires_at = tokens.get("expires_at", 0)
-                        expired_ago = int(time.time() - expires_at)
-                        logger.warning(
-                            f"Cloud token expired {expired_ago}s ago - may need 'bm cloud login'"
-                        )
-                    else:
-                        logger.info("Cloud: authenticated (OAuth token valid)")
-
-                if config.cloud_api_key:
-                    logger.info("Cloud: API key configured")
-
-                # Track if we created the engine (vs test fixtures providing it)
-                # This prevents disposing an engine provided by test fixtures when
-                # multiple Client connections are made in the same test
-                engine_was_none = db._engine is None
-
-                # Initialize app (runs migrations, reconciles projects)
-                await initialize_app(container.config)
-
-                if read_cache is not None:
-                    read_cache = await _invalidate_persisted_read_cache(read_cache)
-                    container.read_cache = read_cache
-                    api_container.read_cache = read_cache
-
-                # Log embedding status so it's easy to spot in the logs
-                if db._session_maker is not None:
-                    await _log_embedding_status(db._session_maker)
-
-                # Create and start local watch coordinator (lifecycle centralized in coordinator)
-                watch_coordinator = container.create_watch_coordinator()
-                await watch_coordinator.start()
-
-            try:
-                yield
-            finally:
-                # Shutdown - coordinator handles clean task cancellation
                 with logfire.span(
-                    "mcp.lifecycle.shutdown",
+                    "mcp.lifecycle.startup",
                     entrypoint="mcp",
                     mode=container.mode.name.lower(),
+                    default_project=config.default_project,
                 ):
-                    logger.debug("Shutting down Basic Memory MCP server")
+                    logger.info(f"Starting Basic Memory MCP server (mode={container.mode.name})")
+                    logger.info(
+                        f"Config: database_backend={config.database_backend.value}, "
+                        f"default_project={config.default_project}"
+                    )
+                    logger.info(
+                        f"Semantic search: provider={config.semantic_embedding_provider}, "
+                        f"model={config.semantic_embedding_model}, "
+                        f"dimensions={config.semantic_embedding_dimensions or 'auto'}, "
+                        f"batch_size={config.semantic_embedding_batch_size}, "
+                        f"document_prefix_set={bool(config.semantic_embedding_document_prefix)}, "
+                        f"query_prefix_set={bool(config.semantic_embedding_query_prefix)}"
+                    )
 
-                    await watch_coordinator.stop()
+                    # Log configured projects with their routing mode
+                    for name, entry in config.projects.items():
+                        default = " (default)" if name == config.default_project else ""
+                        logger.info(
+                            f"Project: {name} -> {entry.path} [mode={entry.mode.value}]{default}"
+                        )
 
-                    # A local note write returns 202 before its markdown file is written;
-                    # shutdown can land while that materialization (and the vector sync /
-                    # relation resolution it schedules) is still queued in the in-process
-                    # pool. Drain both queues before the engine closes so an accepted
-                    # write is never lost — mirrors the API lifespan shutdown.
-                    await drain_pending_materializations()
-                    await drain_background_tasks()
+                    # Check cloud auth status (local file check, no network call)
+                    auth = CLIAuth(
+                        client_id=config.cloud_client_id, authkit_domain=config.cloud_domain
+                    )
+                    tokens = auth.load_tokens()
+                    if tokens is not None:
+                        if not auth.is_token_valid(tokens):
+                            expires_at = tokens.get("expires_at", 0)
+                            expired_ago = int(time.time() - expires_at)
+                            logger.warning(
+                                f"Cloud token expired {expired_ago}s ago - may need 'bm cloud login'"
+                            )
+                        else:
+                            logger.info("Cloud: authenticated (OAuth token valid)")
 
-                    # Only shutdown DB if we created it (not if test fixture provided it)
-                    if engine_was_none:
-                        await db.shutdown_db()
-                        logger.debug("Database connections closed")
-                    else:  # pragma: no cover
-                        logger.debug("Skipping DB shutdown - engine provided externally")
+                    if config.cloud_api_key:
+                        logger.info("Cloud: API key configured")
+
+                    # Initialize app (runs migrations, reconciles projects)
+                    await initialize_app(container.config)
+
+                    if read_cache is not None:
+                        read_cache = await _invalidate_persisted_read_cache(read_cache)
+                        container.read_cache = read_cache
+                        api_container.read_cache = read_cache
+
+                    # Log embedding status so it's easy to spot in the logs
+                    if db._session_maker is not None:
+                        await _log_embedding_status(db._session_maker)
+
+                    if config.git_repositories:
+                        await drain_pending_materializations()
+                        await drain_background_tasks()
+                        _, session_maker = await db.get_or_create_db(config.database_path)
+                        api_container.git_host = await git_resources.enter_async_context(
+                            run_git_host(config, session_maker, read_cache=read_cache)
+                        )
+
+                    # Create and start local watch coordinator (lifecycle centralized in coordinator)
+                    watch_coordinator = container.create_watch_coordinator()
+                    await watch_coordinator.start()
+
+                try:
+                    yield
+                finally:
+                    # Shutdown - coordinator handles clean task cancellation
+                    with logfire.span(
+                        "mcp.lifecycle.shutdown",
+                        entrypoint="mcp",
+                        mode=container.mode.name.lower(),
+                    ):
+                        logger.debug("Shutting down Basic Memory MCP server")
+
+                        await watch_coordinator.stop()
+                        await git_resources.aclose()
+                        api_container.git_host = None
+
+                        # A local note write returns 202 before its markdown file is written;
+                        # shutdown can land while that materialization (and the vector sync /
+                        # relation resolution it schedules) is still queued in the in-process
+                        # pool. Drain both queues before the engine closes so an accepted
+                        # write is never lost — mirrors the API lifespan shutdown.
+                        await drain_pending_materializations()
+                        await drain_background_tasks()
+
+    finally:
+        if engine_was_none:
+            await db.shutdown_db()
 
 
 # A newly-connected model only sees the server `instructions` for free — everything else

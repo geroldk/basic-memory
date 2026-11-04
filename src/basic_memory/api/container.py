@@ -24,6 +24,7 @@ from basic_memory.runtime.mode import RuntimeMode, resolve_runtime_mode
 
 if TYPE_CHECKING:  # pragma: no cover
     from basic_memory.index.watch_coordinator import WatchCoordinator
+    from basic_memory.index.git_host import GitHost
 
 
 @dataclass
@@ -46,6 +47,7 @@ class ApiContainer:
     # Hosts inject a namespace-bound implementation. Standalone MCP may install
     # one for its in-process ASGI path; unconfigured callers receive None.
     read_cache: RedisReadCache | None = None
+    git_host: "GitHost | None" = None
 
     @classmethod
     def create(cls) -> "ApiContainer":  # pragma: no cover
@@ -70,7 +72,12 @@ class ApiContainer:
         - Not in test mode (tests manage their own watcher lifecycle)
         - Not in cloud mode (cloud handles storage events differently)
         """
-        return self.config.index_changes and not self.mode.is_test and not self.mode.is_cloud
+        return (
+            self.config.index_changes
+            and not self.config.git_repositories
+            and not self.mode.is_test
+            and not self.mode.is_cloud
+        )
 
     @property
     def watch_skip_reason(self) -> str | None:  # pragma: no cover
@@ -78,6 +85,8 @@ class ApiContainer:
 
         Useful for logging why local watching was disabled.
         """
+        if self.config.git_repositories:
+            return "Git worker owns project projection"
         if self.mode.is_test:
             return "Test environment detected"
         if self.mode.is_cloud:

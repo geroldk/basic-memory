@@ -200,7 +200,7 @@ async def reconcile_projects_with_config_once(app_config: BasicMemoryConfig) -> 
     Outcome: the same reconciliation the servers run, once per process; cloud and
     stateless deployments stay untouched, matching initialize_app().
     """
-    if app_config.skip_local_initialization:
+    if app_config.skip_local_initialization or app_config.git_repositories:
         return
     database_path = Path(app_config.database_path)
     if database_path in _reconciled_database_paths:
@@ -232,6 +232,10 @@ async def initialize_file_indexing(
     Returns:
         The watch service task that's monitoring file changes
     """
+    if app_config.git_repositories:
+        from basic_memory.repository.git_projection_repository import GitProjectionConflict
+
+        raise GitProjectionConflict("Legacy file indexing is disabled on the Git host")
     # Never start file watching during tests. Even "background" watchers add tasks/threads
     # and can interact badly with strict asyncio teardown (especially on Windows/aiosqlite).
     # Skip file indexing in test environments to avoid interference with tests
@@ -381,6 +385,12 @@ async def initialize_app(
     logger.info("Initializing app...")
     # Initialize database first
     await initialize_database(app_config)
+
+    if app_config.git_repositories:
+        # A Git host binds an already adopted registry. Reconciliation could
+        # delete/rename it before the Git lifecycle has validated ownership.
+        logger.info("Git host will validate the existing project registry")
+        return
 
     # Reconcile projects from config.json with projects table
     await reconcile_projects_with_config(app_config)

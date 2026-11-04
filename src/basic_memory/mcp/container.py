@@ -58,7 +58,12 @@ class McpContainer:
         - Not in test mode (tests manage their own watcher lifecycle)
         - Not in cloud mode (cloud handles storage events differently)
         """
-        return self.config.index_changes and not self.mode.is_test and not self.mode.is_cloud
+        return (
+            self.config.index_changes
+            and not self.config.git_repositories
+            and not self.mode.is_test
+            and not self.mode.is_cloud
+        )
 
     @property
     def watch_skip_reason(self) -> str | None:
@@ -66,6 +71,8 @@ class McpContainer:
 
         Useful for logging why local watching was disabled.
         """
+        if self.config.git_repositories:
+            return "Git worker owns project projection"
         if self.mode.is_test:
             return "Test environment detected"
         if self.mode.is_cloud:
