@@ -17,6 +17,7 @@ from basic_memory.config_migrations import (
     migrate_legacy_sync_fields,
 )
 from basic_memory.utils import generate_permalink
+from basic_memory.config_git import GitSyncRemote
 
 
 DATABASE_NAME = "memory.db"
@@ -208,6 +209,10 @@ class BasicMemoryConfig(BaseSettings):
     )
     git_transaction_idle_seconds: int = Field(default=1800, gt=0)
     git_transaction_retention_seconds: int = Field(default=604800, ge=0)
+    git_sync_remotes: dict[UUID, GitSyncRemote] = Field(
+        default_factory=dict,
+        description="Optional private peer per Git project. Explicit opportunistic sync only.",
+    )
 
     # overridden by ~/.basic-memory/config.json
     log_level: str = "INFO"

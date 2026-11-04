@@ -15,6 +15,7 @@ from basic_memory.schemas.project_info import ProjectList, ProjectStatusResponse
 from basic_memory.schemas.v2 import ProjectResolveResponse
 from basic_memory.schemas.doctor import ProjectDoctorReport
 from basic_memory.schemas.git_status import GitProjectStatus
+from basic_memory.schemas.git_sync import GitSyncStatus
 
 
 class ProjectClient:
@@ -232,6 +233,12 @@ class ProjectClient:
             self.http_client, f"/v2/projects/{project_external_id}/git/status"
         )
         return GitProjectStatus.model_validate(response.json())
+
+    async def sync_git(self, project_external_id: str) -> GitSyncStatus:
+        from basic_memory.mcp.tools.utils import call_post
+
+        response = await call_post(self.http_client, f"/v2/projects/{project_external_id}/git/sync")
+        return GitSyncStatus.model_validate(response.json())
 
     async def get_doctor_report(self, project_external_id: str) -> ProjectDoctorReport:
         """Report a project's problems and their repairs without changing the project."""

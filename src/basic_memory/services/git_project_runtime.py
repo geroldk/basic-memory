@@ -46,6 +46,8 @@ from basic_memory.services.note_content_writes import (
     NoteContentMutationServiceError,
 )
 from basic_memory.services.git_transactions import GitTransactionService
+from basic_memory.schemas.git_sync import GitSyncRemote
+from basic_memory.services.git_sync import GitSyncService
 
 
 class GitProjectRuntime:
@@ -65,6 +67,7 @@ class GitProjectRuntime:
         poll_interval: float = 5,
         transaction_idle_seconds: int = 1800,
         transaction_retention_seconds: int = 604800,
+        sync_remote: GitSyncRemote | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.dependencies = dependencies
@@ -80,6 +83,7 @@ class GitProjectRuntime:
             idle_seconds=transaction_idle_seconds,
             retention_seconds=transaction_retention_seconds,
         )
+        self.sync = GitSyncService(self, sync_remote)
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator["GitProjectRuntime"]:
@@ -88,9 +92,14 @@ class GitProjectRuntime:
             self._running = True
             try:
                 await self.transactions.maintain()
+                await self.sync.recover()
                 yield self
             finally:
                 self._running = False
+                # Bounded transfers may outlive their caller. Drain them before
+                # another process can acquire this project's repository ownership.
+                async with self.sync.lock:
+                    pass
                 # An ASGI host must drain request tasks before exiting its lifespan.
                 # Also wait for any admitted mutation before releasing ownership.
                 async with self.gate:

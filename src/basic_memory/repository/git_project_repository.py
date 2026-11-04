@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from functools import partial
 from tempfile import TemporaryDirectory
+from typing import Literal
 from uuid import UUID, uuid4
 
 from basic_memory.schemas.git_project import (
@@ -174,6 +175,125 @@ class GitProjectRepository:
 
     def head(self) -> str:
         return self._git("rev-parse", "--verify", PUBLISHED_REF).strip().decode("ascii")
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        _require_commit_id(ancestor)
+        _require_commit_id(descendant)
+        result = self._run("merge-base", "--is-ancestor", ancestor, descendant)
+        if result.returncode not in {0, 1}:
+            raise GitPublicationError("Cannot classify Git ancestry")
+        return result.returncode == 0
+
+    def relationship(
+        self, local: str, remote: str | None
+    ) -> Literal["unobserved", "equal", "ahead", "behind", "diverged"]:
+        if remote is None:
+            return "unobserved"
+        if local == remote:
+            return "equal"
+        if self.is_ancestor(remote, local):
+            return "ahead"
+        if self.is_ancestor(local, remote):
+            return "behind"
+        return "diverged"
+
+    def _transfer(self, *arguments: str) -> bytes:
+        environment = self._environment()
+        environment.update(
+            GIT_TERMINAL_PROMPT="0",
+            GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10",
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "--git-dir",
+                str(self.path),
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "protocol.ssh.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                *arguments,
+            ],
+            capture_output=True,
+            check=False,
+            env=environment,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            # Git stderr can include peer URLs and credential-helper output.
+            raise GitPublicationError(
+                "Git peer transfer failed; inspect protected host logs/config"
+            )
+        return result.stdout
+
+    def fetch_published(self, remote: str, attempt_id: UUID) -> str | None:
+        """Retain only the peer's published branch in an isolated incoming ref."""
+        advertised = self._transfer("ls-remote", "--refs", "--", remote, PUBLISHED_REF)
+        if not advertised.strip():
+            return None
+        reference = f"refs/bm/incoming/{attempt_id}"
+        self._transfer(
+            "fetch",
+            "--no-tags",
+            "--no-prune",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--no-auto-maintenance",
+            "--refmap=",
+            "--",
+            remote,
+            f"{PUBLISHED_REF}:{reference}",
+        )
+        return self._git("rev-parse", "--verify", reference).strip().decode("ascii")
+
+    def incoming_snapshots(self, attempt_id: UUID, commit_id: str) -> list[GitSnapshot]:
+        """Validate every newly received historical tree before accepting its tip."""
+        _require_commit_id(commit_id)
+        reference = f"refs/bm/incoming/{attempt_id}"
+        if self._git("rev-parse", "--verify", reference).strip().decode("ascii") != commit_id:
+            raise GitPublicationError("Incoming reference changed before validation")
+        commits = self._git("rev-list", commit_id, "--not", PUBLISHED_REF).decode().splitlines()
+        return [self._read_snapshot(commit) for commit in (commits or [commit_id])]
+
+    def publish_incoming(self, attempt_id: UUID, commit_id: str, base_commit: str) -> None:
+        """The same single-ref publication boundary, without inventing a local commit."""
+        _require_commit_id(commit_id)
+        _require_commit_id(base_commit)
+        if not self.is_ancestor(base_commit, commit_id):
+            raise GitPublicationError("Incoming publication must fast-forward local history")
+        commands = (
+            "start\n"
+            f"verify refs/bm/incoming/{attempt_id} {commit_id}\n"
+            f"update {PUBLISHED_REF} {commit_id} {base_commit}\n"
+            "prepare\ncommit\n"
+        )
+        result = self._run("update-ref", "--stdin", input_bytes=commands.encode())
+        if result.returncode != 0:
+            actual = self.head()
+            if actual != base_commit:
+                raise GitPublicationConflict(base_commit, actual)
+            raise GitPublicationError("Incoming reference changed before publication")
+
+    def push_published(self, remote: str, commit_id: str) -> None:
+        _require_commit_id(commit_id)
+        if not self.is_ancestor(commit_id, self.head()):
+            raise GitPublicationError("Only published ancestry can be sent to a Git peer")
+        self._transfer(
+            "push",
+            "--no-verify",
+            "--no-follow-tags",
+            "--porcelain",
+            "--",
+            remote,
+            f"{commit_id}:{PUBLISHED_REF}",
+        )
 
     def initial_snapshot(self) -> GitSnapshot:
         """Require the empty initialization commit before adopting a legacy project."""

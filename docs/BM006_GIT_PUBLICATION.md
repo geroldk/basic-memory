@@ -1,6 +1,6 @@
 # BM-006: Git publication, recovery and opt-in local hosting
 
-Status: eight implementation slices, 2026-11-04. Experimental code on
+Status: nine implementation slices, 2026-11-04. Experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. API/MCP hosting can now
 select Git through explicit configuration after controlled adoption. The default
 configuration stays on the existing write path. No productive installation or
@@ -344,8 +344,13 @@ through hidden state.
 
 ## Remaining before productive use
 
-The next implementation milestone is per-project offline Git synchronization. Remaining
-implementation and operational obligations include:
+The [opportunistic project sync](BM006_GIT_SYNC.md) is implemented through API and
+`bm_project(command="sync")`: branch-only fetch/non-force push, validated incoming
+history, single-ref fast-forward publication, durable observations and visible
+divergence. Network waits do not hold local mutation admission. Private drafts and
+local receipts stay local. Peer endpoints and production cutover are still unset.
+
+Remaining implementation and operational obligations include:
 
 1. Complete controlled first import/migration and operational host cutover. The isolated
    adoption primitive below preserves accepted-but-unwritten content, but does not
@@ -366,9 +371,11 @@ implementation and operational obligations include:
    caller-held keys and terminal receipts. Measure retained-record maintenance
    on the intended transaction history. The explicit API is implemented, but
    branch-only cloning does not restore local operational state.
-5. Add per-project opportunistic offline synchronization, explicit divergence
-   handling, clone/restore tests and recovery of local operational state. A
-   conflict in one project must not block unrelated projects.
+5. Validate actual peer access/deployment and clone/restore on both installations,
+   operational state backup, retained-incoming-ref housekeeping and large-history
+   validation cost. Divergence stops independently per project; reviewed external
+   two-parent merges can then converge normally. A native merge-review API and an
+   automatic network schedule are not part of this slice.
 6. Before the **first productive Git publication**, control every legacy writer:
    API/MCP, active/in-flight materializers, watcher/editor imports, Cloud imports,
    timers and manual sync. Accepted but unwritten content must be included. The
@@ -509,9 +516,9 @@ and vectors account for the remaining whole-project work.
 
 ## Validation
 
-The combined suite verifies 315 current Git, host, transaction and API/process cases,
-including 54 new transaction cases. All 31 Git/host/transaction modules (including three
-migrations and the narrow follow-up protocol) have 1909/1909 executable lines
+The combined suite verifies 359 current Git, host, transaction, sync and API/process cases,
+including 44 new sync cases. All 35 Git core/host/transaction/sync modules (including three
+migrations and the narrow follow-up protocol) have 2177/2177 executable lines
 covered. One statically unreachable exhaustive-match guard remains excluded.
 A further 504 existing write/read/materialization/authorship/BM-002/BM-003,
 routing, lifecycle, configuration and tool-contract regression cases pass;
@@ -535,7 +542,8 @@ python -m pytest tests/repository/test_git_publication.py \
   tests/test_git_graph_basis_migration.py tests/test_git_host_contracts.py \
   test-int/test_git_host_integration.py tests/repository/test_git_transactions.py \
   tests/schemas/test_git_transaction_controls.py \
-  test-int/test_git_transactions_integration.py -q --no-cov
+  test-int/test_git_transactions_integration.py tests/repository/test_git_sync_primitives.py \
+  test-int/test_git_sync_integration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \

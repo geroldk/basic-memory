@@ -35,7 +35,7 @@ from basic_memory.mcp.tools.recent_activity import RecentRows, recent_activity_p
 from basic_memory.mcp.clients.project import ProjectClient
 from basic_memory.mcp.project_context import get_project_client
 
-type ProjectCommand = Literal["list", "create", "recent", "status"]
+type ProjectCommand = Literal["list", "create", "recent", "status", "sync"]
 
 Workspace = Annotated[
     str | None,
@@ -50,7 +50,8 @@ Workspace = Annotated[
         "Basic Memory projects. `command`: list (projects, grouped by workspace); create "
         "(`name`, `path`, optional `set_default`, `workspace`); recent (what changed "
         "lately in the required `project`: `since`, `items`, paging); status "
-        "(local Git publication and index progress for the required `project`)."
+        "(local Git publication, indexes and last peer observation); sync "
+        "(explicit peer fetch/push for the required local Git project; divergence stops)."
     ),
     tags={"projects"},
     annotations={
@@ -93,6 +94,20 @@ async def bm_project(
 ) -> str | dict[str, Any] | list[dict[str, Any]]:
     """List/create projects or report recent changes and local Git progress."""
     match command:
+        case "sync":
+            if project is None:
+                raise refusal(
+                    "INVALID_ARGUMENTS", "sync needs `project`.", output_format=output_format
+                )
+            project_name, project_id = routing_arguments(parse_project(project))
+            async with get_project_client(project_name, context=context, project_id=project_id) as (
+                client,
+                active_project,
+            ):
+                sync = await ProjectClient(client).sync_git(active_project.external_id)
+            if output_format == "json":
+                return sync.model_dump(mode="json")
+            return sync.model_dump_json(indent=2)
         case "status":
             if project is None:
                 raise refusal(
@@ -116,6 +131,10 @@ async def bm_project(
                 lines.append(f"{stage.stage}: {completed}")
                 if stage.last_error is not None:
                     lines.append(f"  {stage.last_error}")
+            if status.synchronization is not None:
+                lines.append(f"Peer (last observation): {status.synchronization.relationship}")
+                if status.synchronization.last_attempt is not None:
+                    lines.append(status.synchronization.last_attempt.model_dump_json())
             return "\n".join(lines)
         case "list":
             return await list_memory_projects(output_format=output_format, context=context)

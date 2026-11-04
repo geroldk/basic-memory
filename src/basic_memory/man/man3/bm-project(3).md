@@ -37,6 +37,11 @@ bm_project(command, name=None, path=None, set_default=False, workspace=None,
   Reports source revision and separate SQL content, file, graph/full-text and
   vector completion. This observes progress; it does not wait or pin a snapshot.
   Available on an explicitly configured local Git host.
+- `sync` — explicitly fetch/push the configured private Git peer for `project`.
+  Local writes work offline. Incoming fast-forwards are validated before publication;
+  divergence stops for review. JSON returns the last attempt and observed relationship.
+  Inspect `last_attempt.kind`: HTTP success can carry `failed` after a transport error.
+  `status` includes the same passive synchronization observation. No timer is created.
 
 bm_project never deletes; bm_project_delete does, and only when the server
 enables it.

@@ -53,6 +53,8 @@ async def run_git_host(
     its Git source. Refuse that topology until every legacy path can participate.
     This context does not stop external processes, editors or Cloud sync jobs.
     """
+    if not set(app_config.git_sync_remotes) <= set(app_config.git_repositories):
+        raise GitProjectionConflict("Git peers must refer to configured Git project UUIDs")
     if not app_config.git_repositories:
         yield None
         return
@@ -112,6 +114,7 @@ async def run_git_host(
             dependencies,
             transaction_idle_seconds=app_config.git_transaction_idle_seconds,
             transaction_retention_seconds=app_config.git_transaction_retention_seconds,
+            sync_remote=app_config.git_sync_remotes.get(UUID(project.external_id)),
         )
     async with AsyncExitStack() as stack:
         for runtime in runtimes.values():

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from basic_memory.repository.git_progress_repository import GitProjectionStage
+from basic_memory.schemas.git_sync import GitSyncStatus
 
 
 class GitStageStatus(BaseModel):
@@ -22,3 +23,4 @@ class GitProjectStatus(BaseModel):
     caught_up: bool
     read_consistency: Literal["relaxed"] = "relaxed"
     stages: list[GitStageStatus]
+    synchronization: GitSyncStatus | None = None
