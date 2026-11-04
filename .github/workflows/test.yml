@@ -188,6 +188,9 @@ jobs:
     # Pin every uv call, including `uv run` inside just recipes. See top of file.
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      # The ubuntu 3.14 rows record coverage for the coverage job; sysmon keeps it cheap.
+      BASIC_MEMORY_PYTEST_COV_FLAGS: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14' && '--cov --cov-report= --cov-fail-under=0' || '--no-cov' }}
+      COVERAGE_CORE: sysmon
 
     steps:
       - uses: actions/checkout@v6
@@ -227,6 +230,15 @@ jobs:
             test-results.xml
             test-files.txt
 
+      - name: Upload coverage data
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-sqlite-unit-g${{ matrix.group }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
   test-sqlite-integration:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -252,6 +264,9 @@ jobs:
     # Pin every uv call, including `uv run` inside just recipes. See top of file.
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      # The ubuntu 3.14 rows record coverage for the coverage job; sysmon keeps it cheap.
+      BASIC_MEMORY_PYTEST_COV_FLAGS: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14' && '--cov --cov-report= --cov-fail-under=0' || '--no-cov' }}
+      COVERAGE_CORE: sysmon
 
     steps:
       - uses: actions/checkout@v6
@@ -291,20 +306,31 @@ jobs:
             test-results.xml
             test-files.txt
 
+      - name: Upload coverage data
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-sqlite-integration-g${{ matrix.group }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
   test-postgres-unit:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    name: Test Postgres Unit (Python ${{ matrix.python-version }}, shard ${{ matrix.group }}/6)
+    name: Test Postgres Unit (Python ${{ matrix.python-version }}, shard ${{ matrix.group }}/4)
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # Shard the largest suite across parallel jobs: each shard is a full job
-        # with its own Postgres service running 1/6 of the files, balanced
+        # with its own Postgres service running 1/4 of the files, balanced
         # by the recorded .test_durations (refresh with `just test-durations-postgres`).
+        # Within a shard, xdist runs one worker per runner core (2 on ubuntu-latest),
+        # each on its own database on that service.
         # Postgres runs on the latest Python only — the SQLite matrix carries
         # Python-version coverage; Postgres carries backend coverage.
-        group: [1, 2, 3, 4, 5, 6]
+        group: [1, 2, 3, 4]
         python-version: ["3.14"]
     runs-on: ubuntu-latest
     services:
@@ -326,6 +352,10 @@ jobs:
       BASIC_MEMORY_TEST_POSTGRES_URL: postgresql://basic_memory_user:dev_password@127.0.0.1:5432/basic_memory_test
       # Pin every uv call, including `uv run` inside just recipes. See top of file.
       UV_PYTHON: ${{ matrix.python-version }}
+      # Postgres jobs always record coverage for the coverage job. A shard covers part of
+      # the code, so only the Coverage job enforces fail_under (--cov-fail-under=0 here).
+      BASIC_MEMORY_PYTEST_COV_FLAGS: --cov --cov-report= --cov-fail-under=0
+      COVERAGE_CORE: sysmon
 
     steps:
       - uses: actions/checkout@v6
@@ -354,7 +384,7 @@ jobs:
 
       - name: Run tests
         run: |
-          just test-unit-postgres --splits 6 --group ${{ matrix.group }} --file-list test-files.txt --durations=30 --junitxml=test-results.xml
+          just test-unit-postgres --splits 4 --group ${{ matrix.group }} --file-list test-files.txt --durations=30 --junitxml=test-results.xml
 
       - name: Upload test results
         if: always()
@@ -364,6 +394,15 @@ jobs:
           path: |
             test-results.xml
             test-files.txt
+
+      - name: Upload coverage data
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres-unit-g${{ matrix.group }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
 
   test-postgres-integration:
     needs: changes
@@ -397,6 +436,10 @@ jobs:
       BASIC_MEMORY_TEST_POSTGRES_URL: postgresql://basic_memory_user:dev_password@127.0.0.1:5432/basic_memory_test
       # Pin every uv call, including `uv run` inside just recipes. See top of file.
       UV_PYTHON: ${{ matrix.python-version }}
+      # Postgres jobs always record coverage for the coverage job. A shard covers part of
+      # the code, so only the Coverage job enforces fail_under (--cov-fail-under=0 here).
+      BASIC_MEMORY_PYTEST_COV_FLAGS: --cov --cov-report= --cov-fail-under=0
+      COVERAGE_CORE: sysmon
 
     steps:
       - uses: actions/checkout@v6
@@ -435,6 +478,63 @@ jobs:
           path: |
             test-results.xml
             test-files.txt
+
+      - name: Upload coverage data
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres-integration-g${{ matrix.group }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    # One report over every suite: SQLite unit and integration (ubuntu, 3.14) and
+    # Postgres unit and integration. fail_under in pyproject.toml is the floor.
+    needs:
+      [changes, test-sqlite-unit, test-sqlite-integration, test-postgres-unit, test-postgres-integration]
+    if: needs.changes.outputs.code == 'true'
+    name: Coverage
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+
+    # Pin every uv call, including `uv run` inside just recipes. See top of file.
+    env:
+      UV_PYTHON: "3.14"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install uv
+        run: |
+          pip install uv
+
+      - name: Create virtual env
+        run: |
+          uv venv
+
+      - name: Install dependencies
+        run: |
+          uv pip install -e ".[dev,pdf]"
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-data
+
+      - name: Combine and report
+        run: |
+          uv run coverage combine coverage-data/*/.coverage
+          # The summary is informational; the second report enforces fail_under.
+          uv run coverage report --format=markdown --skip-covered --sort=-miss --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
+          uv run coverage report --skip-covered --sort=-miss
 
   test-semantic:
     needs: changes

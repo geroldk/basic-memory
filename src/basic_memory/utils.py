@@ -9,6 +9,7 @@ import re
 import shlex
 import sys
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import override, Any, Protocol, Union, runtime_checkable, List, Optional
@@ -311,6 +312,32 @@ def build_canonical_permalink(
     return project_path
 
 
+def build_file_path_permalink(
+    project_permalink: Optional[str],
+    file_path: Union[Path, str, PathLike],
+    include_project: bool = True,
+    *,
+    workspace_permalink: Optional[str] = None,
+) -> str:
+    """Build the canonical permalink for a project-relative file path.
+
+    ``build_canonical_permalink`` leaves input that already starts with the project
+    slug alone, which is right for lookup candidates that may be qualified already.
+    A real file path is never qualified: ``cabinet/x.md`` in project ``cabinet`` is a
+    file in the ``cabinet/`` folder, and must not share ``x.md``'s permalink (#2024).
+    """
+    normalized_path = generate_permalink(file_path)
+    if workspace_permalink:
+        if not project_permalink:
+            raise ValueError("workspace_permalink requires project_permalink")
+        project_path = f"{generate_permalink(project_permalink)}/{normalized_path}"
+        return f"{generate_permalink(workspace_permalink)}/{project_path}"
+
+    if not include_project or not project_permalink:
+        return normalized_path
+    return f"{generate_permalink(project_permalink)}/{normalized_path}"
+
+
 def build_qualified_permalink_reference(
     project_permalink: Optional[str],
     identifier: Union[Path, str, PathLike],
@@ -450,6 +477,26 @@ def build_permalink_resolution_candidates(
     add_candidate(normalized_path)
     if not normalized_project:
         return candidates
+
+    # Trigger: the path starts with the project slug (`cabinet/plan` in project `cabinet`).
+    # Why: that can be a real top-level folder named like the project, whose notes carry
+    #   `cabinet/cabinet/plan` (#2024). The qualified reading below would drop the folder
+    #   and land on a root `plan` note instead, so a read or edit reaches the wrong note.
+    # Outcome: try the literal folder reading first; when no such note exists the qualified
+    #   reading still resolves, so plain project-qualified identifiers keep working.
+    if normalized_path == normalized_project or normalized_path.startswith(
+        f"{normalized_project}/"
+    ):
+        if normalized_workspace:
+            add_candidate(
+                build_file_path_permalink(
+                    normalized_project,
+                    normalized_path,
+                    workspace_permalink=normalized_workspace,
+                )
+            )
+        if include_project:
+            add_candidate(build_file_path_permalink(normalized_project, normalized_path))
 
     workspace_project_prefix = (
         f"{normalized_workspace}/{normalized_project}" if normalized_workspace else None
@@ -809,46 +856,26 @@ def normalize_file_path_for_comparison(file_path: str) -> str:
     return normalized
 
 
-def detect_potential_file_conflicts(file_path: str, existing_paths: List[str]) -> List[str]:
-    """Detect potential conflicts between a file path and existing paths.
+@dataclass(frozen=True, slots=True)
+class FilePathConflictKeys:
+    """The two forms under which two different file paths name the same note.
 
-    This function checks for various types of conflicts:
-    - Case sensitivity differences
-    - Unicode normalization differences
-    - Path separator differences
-    - Permalink generation conflicts
-
-    Args:
-        file_path: The file path to check
-        existing_paths: List of existing file paths to check against
-
-    Returns:
-        List of existing paths that might conflict with the given file path
+    Two paths conflict when their ``path_key`` values are equal (they differ only by case,
+    Unicode normalization, or separators) or when their ``permalink`` values are equal (they
+    generate the same permalink, like ``Foo Bar.md`` and ``foo_bar.md``). The entity table
+    stores both values for every row so the check is an indexed lookup instead of a scan.
     """
-    conflicts = []
 
-    # Normalize the input file path
-    normalized_input = normalize_file_path_for_comparison(file_path)
-    input_permalink = generate_permalink(file_path)
+    path_key: str
+    permalink: str
 
-    for existing_path in existing_paths:
-        # Skip identical paths
-        if existing_path == file_path:
-            continue
 
-        # Check for case-insensitive path conflicts
-        normalized_existing = normalize_file_path_for_comparison(existing_path)
-        if normalized_input == normalized_existing:
-            conflicts.append(existing_path)
-            continue
-
-        # Check for permalink conflicts
-        existing_permalink = generate_permalink(existing_path)
-        if input_permalink == existing_permalink:
-            conflicts.append(existing_path)
-            continue
-
-    return conflicts
+def file_path_conflict_keys(file_path: str) -> FilePathConflictKeys:
+    """Return the conflict keys for one project-relative file path."""
+    return FilePathConflictKeys(
+        path_key=normalize_file_path_for_comparison(file_path),
+        permalink=generate_permalink(file_path),
+    )
 
 
 def resolve_directory_casing(directory: str, existing_directories: List[str]) -> str:

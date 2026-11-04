@@ -9,6 +9,9 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry"
 import { BmClient } from "../bm-client.ts"
 import { registerProjectListTool } from "../tools/list-memory-projects.ts"
 import { registerReadTool } from "../tools/read-note.ts"
+import { registerSchemaDiffTool } from "../tools/schema-diff.ts"
+import { registerSchemaInferTool } from "../tools/schema-infer.ts"
+import { registerSchemaValidateTool } from "../tools/schema-validate.ts"
 import { registerWriteTool } from "../tools/write-note.ts"
 
 const RUN_INTEGRATION = process.env.BM_INTEGRATION === "1"
@@ -21,6 +24,7 @@ type Harness = {
   workspaceDir: string
   projectPath: string
   projectName: string
+  env: Record<string, string>
 }
 
 let harness: Harness | null = null
@@ -180,6 +184,7 @@ if (!RUN_INTEGRATION) {
         workspaceDir,
         projectPath,
         projectName,
+        env: childEnv,
       }
     })
 
@@ -312,7 +317,11 @@ if (!RUN_INTEGRATION) {
       // overwrite=false refuses a second write instead of replacing the note.
       const refused = await call("write_note", writeArgs)
       expect(refused.details.error).toBe("note_already_exists")
-      expect(refused.content[0].text).toContain("Note already exists")
+      // Since #1838 the agent sees bm_write's own refusal text, not the
+      // plugin's fallback message.
+      expect(refused.content[0].text).toContain(
+        "A note already exists at 'memory-quest/Memory Master.md'. Nothing was written.",
+      )
 
       // read_note by project_id surfaces the metadata as frontmatter and the
       // checksum that guards a replacement.
@@ -363,12 +372,154 @@ if (!RUN_INTEGRATION) {
       expect(after.details.checksum).not.toBe(checksum)
     })
 
+    // Regression (#1997): the schema tools read field names BM never sent
+    // (entity_type, identifier, valid, declared_in), so every note rendered as
+    // "**undefined** — invalid". Unit fixtures are hand-written; this checks
+    // the plugin against a real bm_schema response.
+    it("renders schema tool results from real bm_schema responses", async () => {
+      const { client } = getHarness()
+      const tools = new Map<
+        string,
+        (
+          id: string,
+          params: Record<string, unknown>,
+        ) => Promise<{ content: Array<{ text: string }> }>
+      >()
+      const api = {
+        registerTool: (tool: { name: string; execute: any }) => {
+          tools.set(tool.name, tool.execute)
+        },
+      } as unknown as OpenClawPluginApi
+      registerSchemaValidateTool(api, client)
+      registerSchemaInferTool(api, client)
+      registerSchemaDiffTool(api, client)
+      const text = async (name: string, params: Record<string, unknown>) => {
+        const execute = tools.get(name)
+        if (!execute) throw new Error(`tool ${name} was not registered`)
+        return (await execute("integration", params)).content[0].text
+      }
+
+      await client.writeNote(
+        "Contact",
+        "# Contact",
+        "schema",
+        undefined,
+        false,
+        {
+          noteType: "schema",
+          metadata: {
+            entity: "contact",
+            version: 1,
+            schema: { name: "string, full name", "fax?": "string, legacy" },
+            settings: { validation: "warn" },
+          },
+        },
+      )
+      await client.writeNote(
+        "Ada",
+        "# Ada\n\n- [name] Ada Lovelace",
+        "contacts",
+        undefined,
+        false,
+        { noteType: "contact" },
+      )
+      await client.writeNote(
+        "Bob",
+        "# Bob\n\n- [role] Analyst",
+        "contacts",
+        undefined,
+        false,
+        { noteType: "contact" },
+      )
+
+      // The raw payload carries every field the plugin's types declare.
+      const raw = await client.schemaValidate("contact")
+      expect(raw.note_type).toBe("contact")
+      expect(raw.results.map((r) => [r.note_identifier, r.passed])).toEqual(
+        expect.arrayContaining([
+          ["Ada", true],
+          ["Bob", true],
+        ]),
+      )
+
+      const validated = await text("schema_validate", { noteType: "contact" })
+      expect(validated).toContain("**Type:** contact")
+      expect(validated).toMatch(/- \*\*Ada\*\* — valid/)
+      // Warn mode: a missing required field is a warning, and the note passes.
+      expect(validated).toMatch(/- \*\*Bob\*\* — valid\n {2}- warning: /)
+      expect(validated).not.toContain("undefined")
+
+      const inferred = await text("schema_infer", { noteType: "contact" })
+      expect(inferred).toContain("**Type:** contact")
+      expect(inferred).not.toContain("undefined")
+
+      const drift = await text("schema_diff", { noteType: "contact" })
+      expect(drift).toContain("**Type:** contact")
+      expect(drift).toContain("- **fax** (")
+      expect(drift).not.toContain("undefined")
+    })
+
     it("lists the integration project through real BM MCP", async () => {
       const { client, projectName } = getHarness()
       const projects = await client.listProjects()
       expect(projects.some((project) => project.name === projectName)).toBe(
         true,
       )
+    })
+
+    // Regression (#1988): the harness project is stored at <workspace>/memory,
+    // and BM 1.0 refuses a same-name create at the workspace root (#1846).
+    describe("startup against a project stored at another folder", () => {
+      async function startAtWorkspaceRoot(
+        adoptExistingProject: boolean,
+      ): Promise<BmClient> {
+        const { projectName, workspaceDir, env } = getHarness()
+        const client = new BmClient(BM_BIN, projectName)
+        await client.start({
+          cwd: workspaceDir,
+          env,
+          projectPath: workspaceDir,
+          adoptExistingProject,
+        })
+        return client
+      }
+
+      it("adopts the stored folder when projectPath is the default", async () => {
+        const { projectPath } = getHarness()
+        const client = await startAtWorkspaceRoot(true)
+        try {
+          expect(client.projectUnavailableReason()).toBeNull()
+
+          const created = await client.writeNote(
+            "Adopted Project Note",
+            "Written after adopting the stored project.",
+            "adopted",
+          )
+          await waitForFile(resolve(projectPath, created.file_path), true)
+          await client.deleteNote("adopted/adopted-project-note")
+        } finally {
+          await client.stop()
+        }
+      })
+
+      it("reports the refusal for a configured path but still lists projects", async () => {
+        const { projectName, projectPath } = getHarness()
+        const client = await startAtWorkspaceRoot(false)
+        try {
+          expect(client.projectUnavailableReason()).toContain("ALREADY_EXISTS")
+
+          const listed = (await client.listProjects()).find(
+            (project) => project.name === projectName,
+          )
+          expect(listed?.path).toBe(projectPath)
+
+          await expect(client.recentActivity("7d")).rejects.toThrow(
+            "ALREADY_EXISTS",
+          )
+        } finally {
+          await client.stop()
+        }
+      })
     })
   })
 }

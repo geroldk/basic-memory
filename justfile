@@ -6,6 +6,13 @@ TESTMON_REFRESH_FLAGS := env_var_or_default("BASIC_MEMORY_TESTMON_REFRESH_FLAGS"
 # Optional file sharding, shared by local recipes and CI
 # (e.g. "--splits 3 --group 2"). Empty locally.
 PYTEST_SPLIT_FLAGS := env_var_or_default("BASIC_MEMORY_PYTEST_SPLIT_FLAGS", "")
+# Full suites run on every core. Postgres workers each get their own database
+# (tests/postgres_test_server.py). Set to "" to run a suite serially.
+PYTEST_XDIST_FLAGS := env_var_or_default("BASIC_MEMORY_PYTEST_XDIST_FLAGS", "-n auto")
+# Coverage is off for the test-* recipes. CI turns it on for its Python 3.14 jobs
+# with "--cov --cov-report= --cov-fail-under=0" and COVERAGE_CORE=sysmon, then combines every job's
+# data in one coverage job.
+PYTEST_COV_FLAGS := env_var_or_default("BASIC_MEMORY_PYTEST_COV_FLAGS", "--no-cov")
 
 # Install dependencies
 install:
@@ -47,29 +54,35 @@ test-postgres: test-unit-postgres test-int-postgres
 # Run unit tests against SQLite
 [positional-arguments]
 test-unit-sqlite *args:
-    BASIC_MEMORY_ENV=test uv run python scripts/run_tests.py tests {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v --no-cov {{PYTEST_FLAGS}}
+    BASIC_MEMORY_ENV=test uv run python scripts/run_tests.py tests {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v {{PYTEST_COV_FLAGS}} {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}}
 
-# Run unit tests against Postgres; e.g. just test-unit-postgres --splits 6 --group 1
+# MCP and CLI unit tests are left out on Postgres: no test there depends on the
+# backend, they reach the database through repositories and services that run
+# here, and they cost 26 of Postgres unit's 60 CI minutes. The SQLite suites run
+# them, and the Postgres integration suite covers MCP against Postgres end to end.
+POSTGRES_UNIT_EXCLUDES := "--exclude tests/mcp --exclude tests/cli"
+
+# Run unit tests against Postgres; e.g. just test-unit-postgres --splits 3 --group 1
 [positional-arguments]
 test-unit-postgres *args:
-    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run python scripts/run_tests.py tests {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v --no-cov {{PYTEST_FLAGS}}
+    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run python scripts/run_tests.py tests {{POSTGRES_UNIT_EXCLUDES}} {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v {{PYTEST_COV_FLAGS}} {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}}
 
 # Re-record Postgres unit test durations so CI's file shards stay balanced.
 # Without .test_durations the file splitter estimates work from file sizes.
 test-durations-postgres:
-    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run pytest -p pytest_mock -q --no-cov --store-durations --durations-path .test_durations tests
+    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run pytest -p pytest_mock -q --no-cov --store-durations --durations-path .test_durations --ignore=tests/mcp --ignore=tests/cli tests
 
 # Run integration tests against SQLite (excludes semantic tests and on-demand benchmarks —
 # use just test-semantic / run benchmark files explicitly)
 [positional-arguments]
 test-int-sqlite *args:
-    BASIC_MEMORY_ENV=test uv run python scripts/run_tests.py test-int {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v --no-cov {{PYTEST_FLAGS}} -m "not semantic and not benchmark"
+    BASIC_MEMORY_ENV=test uv run python scripts/run_tests.py test-int {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v {{PYTEST_COV_FLAGS}} {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}} -m "not semantic and not benchmark"
 
 # Run integration tests against Postgres. Per-test and CI job timeouts fail normally;
 # a killed process does not prove that the selected suite finished successfully.
 [positional-arguments]
 test-int-postgres *args:
-    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run python scripts/run_tests.py test-int {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v --no-cov {{PYTEST_FLAGS}} -m "not semantic and not benchmark"
+    BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 uv run python scripts/run_tests.py test-int {{PYTEST_SPLIT_FLAGS}} "$@" -- -p pytest_mock -v {{PYTEST_COV_FLAGS}} {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}} -m "not semantic and not benchmark"
 
 # Fast test selection for local iteration; run targeted tests explicitly when possible.
 fast-test *args: testmon-seed
@@ -485,7 +498,9 @@ test-all:
 # unit and integration, SQLite and Postgres. Each suite is its own process, with
 # the same flags and markers as its test-* recipe, so tests/ and test-int/ fixtures
 # never share a process and on-demand semantic/benchmark tests stay out.
-# [tool.coverage.run] parallel = true gives each run its own data file to combine.
+# pytest-cov collects from xdist workers and --cov-append adds each suite to one
+# data file. sysmon keeps tracing overhead near zero (it doubled test time under
+# the old C tracer). Every suite runs on all cores.
 coverage:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -500,21 +515,24 @@ coverage:
             failed+=("$label")
         fi
     }
-    pytest_args=(-p pytest_mock -v --no-cov {{PYTEST_FLAGS}})
+    # Each suite covers part of the code; only the combined report below checks fail_under.
+    pytest_args=(-p pytest_mock -q --cov --cov-append --cov-report= --cov-fail-under=0 {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}})
     int_markers=(-m "not semantic and not benchmark")
+    export BASIC_MEMORY_ENV=test COVERAGE_CORE=sysmon
 
-    run_suite "unit, SQLite" env BASIC_MEMORY_ENV=test \
-        uv run coverage run -m pytest "${pytest_args[@]}" tests
-    run_suite "integration, SQLite" env BASIC_MEMORY_ENV=test \
-        uv run coverage run -m pytest "${pytest_args[@]}" "${int_markers[@]}" test-int
-    run_suite "unit, Postgres" env BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 \
-        uv run coverage run -m pytest "${pytest_args[@]}" tests
-    run_suite "integration, Postgres" env BASIC_MEMORY_ENV=test BASIC_MEMORY_TEST_POSTGRES=1 \
-        uv run coverage run -m pytest "${pytest_args[@]}" "${int_markers[@]}" test-int
+    run_suite "unit, SQLite" \
+        uv run pytest "${pytest_args[@]}" tests
+    run_suite "integration, SQLite" \
+        uv run pytest "${pytest_args[@]}" "${int_markers[@]}" test-int
+    run_suite "unit, Postgres" env BASIC_MEMORY_TEST_POSTGRES=1 \
+        uv run pytest "${pytest_args[@]}" --ignore=tests/mcp --ignore=tests/cli tests
+    run_suite "integration, Postgres" env BASIC_MEMORY_TEST_POSTGRES=1 \
+        uv run pytest "${pytest_args[@]}" "${int_markers[@]}" test-int
 
-    echo "🧩 Combining coverage data..."
-    uv run coverage combine
-    uv run coverage report -m
+    # The recipe runs without -e so every suite reports; keep the report's status
+    # (2 below fail_under) and return it after the HTML is written.
+    report_status=0
+    uv run coverage report -m || report_status=$?
     uv run coverage html
     echo "Coverage report generated in htmlcov/index.html"
 
@@ -525,6 +543,33 @@ coverage:
         echo "❌ Failed suites: ${failed[*]}"
         exit 1
     fi
+
+    # Trigger: combined coverage is below fail_under in pyproject.toml.
+    # Outcome: fail like the CI Coverage job does.
+    if (( report_status )); then
+        echo "❌ Combined coverage is below the fail_under floor"
+        exit "$report_status"
+    fi
+
+# List test files that can be deleted without losing line coverage, e.g.
+# just test-redundancy --only test-int/mcp. Records which test ran each line across
+# the four suites (about 30 minutes), then picks files greedily. Uses the ctrace core:
+# sysmon credits a line only to the first test that runs it. Read each listed file
+# before deleting it; line coverage cannot see assertions.
+test-redundancy *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export BASIC_MEMORY_ENV=test COVERAGE_CORE=ctrace COVERAGE_FILE=.coverage.contexts
+    rm -f .coverage.contexts .coverage.junit-*.xml
+    pytest_args=(-p pytest_mock -q --cov --cov-append --cov-report= --cov-fail-under=0 --cov-context=test {{PYTEST_XDIST_FLAGS}} {{PYTEST_FLAGS}})
+    int_markers=(-m "not semantic and not benchmark")
+    # Each suite's JUnit report gives the picker file durations, so it removes the
+    # slowest of two duplicates and reports the time saved.
+    uv run pytest "${pytest_args[@]}" --junitxml=.coverage.junit-unit-sqlite.xml tests
+    uv run pytest "${pytest_args[@]}" "${int_markers[@]}" --junitxml=.coverage.junit-int-sqlite.xml test-int
+    BASIC_MEMORY_TEST_POSTGRES=1 uv run pytest "${pytest_args[@]}" --ignore=tests/mcp --ignore=tests/cli --junitxml=.coverage.junit-unit-postgres.xml tests
+    BASIC_MEMORY_TEST_POSTGRES=1 uv run pytest "${pytest_args[@]}" "${int_markers[@]}" --junitxml=.coverage.junit-int-postgres.xml test-int
+    uv run python scripts/test_redundancy.py .coverage.contexts --junit .coverage.junit-*.xml {{args}}
 
 # Lint and fix code (calls fix)
 lint: fix

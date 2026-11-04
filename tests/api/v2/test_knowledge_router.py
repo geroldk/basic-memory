@@ -1881,6 +1881,104 @@ async def test_move_entity_rejects_existing_unindexed_destination(
     assert destination.read_text(encoding="utf-8") == original
 
 
+async def _create_note(client: AsyncClient, v2_project_url: str, title: str) -> str:
+    response = await client.post(
+        f"{v2_project_url}/knowledge/entities",
+        json={"title": title, "directory": "notes", "content": f"{title} content"},
+    )
+    assert response.status_code == 202, response.text
+    return EntityResponseV2.model_validate(response.json()).external_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "destination",
+    [
+        # Same path ignoring case: one file on a case-insensitive filesystem.
+        "notes/SMOKE TEST.md",
+        # Same generated permalink as the existing note's path.
+        "notes/smoke_test.md",
+    ],
+)
+async def test_move_rejects_a_path_equivalent_to_another_note(
+    client: AsyncClient, v2_project_url, destination: str
+):
+    """A move must refuse the same equivalent filenames a create refuses."""
+    await _create_note(client, v2_project_url, "Smoke Test")
+    mover_id = await _create_note(client, v2_project_url, "Second Note")
+
+    response = await client.put(
+        f"{v2_project_url}/knowledge/entities/{mover_id}/move",
+        json={"destination_path": destination},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "equivalent filename" in response.text
+    assert "notes/Smoke Test.md" in response.text
+    unmoved = await client.get(f"{v2_project_url}/knowledge/entities/{mover_id}")
+    assert EntityResponseV2.model_validate(unmoved.json()).file_path == "notes/Second Note.md"
+
+
+@pytest.mark.asyncio
+async def test_move_allows_a_case_only_rename_of_the_same_note(client: AsyncClient, v2_project_url):
+    """The note's own source path is not a conflict, so fixing its casing still works."""
+    note_id = await _create_note(client, v2_project_url, "casing fix")
+
+    response = await client.put(
+        f"{v2_project_url}/knowledge/entities/{note_id}/move",
+        json={"destination_path": "notes/Casing Fix.md"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert EntityResponseV2.model_validate(response.json()).file_path == "notes/Casing Fix.md"
+
+
+@pytest.mark.asyncio
+async def test_put_rename_rejects_a_path_equivalent_to_another_note(
+    client: AsyncClient, v2_project_url
+):
+    """A PUT that renames a note goes through the same equivalence check as a move."""
+    await _create_note(client, v2_project_url, "Smoke Test")
+    renamer_id = await _create_note(client, v2_project_url, "Second Note")
+
+    response = await client.put(
+        f"{v2_project_url}/knowledge/entities/{renamer_id}",
+        json={"title": "SMOKE TEST", "directory": "notes", "content": "Renamed by PUT"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "equivalent filename" in response.text
+
+
+@pytest.mark.asyncio
+async def test_folder_named_like_the_project_keeps_its_segment_in_permalinks(
+    client: AsyncClient, v2_project_url
+):
+    """A note in a top-level folder named like the project keeps the folder (#2024).
+
+    Without it, ``test-project/Plan.md`` and a root ``Plan.md`` both claim
+    ``test-project/plan``, so the second note is silently suffixed ``-1`` and a
+    lookup by the folder path matches two notes.
+    """
+    folder_note = await client.post(
+        f"{v2_project_url}/knowledge/entities",
+        json={"title": "Plan", "directory": "test-project", "content": "In the folder"},
+    )
+    assert folder_note.status_code == 202, folder_note.text
+    folder_entity = EntityResponseV2.model_validate(folder_note.json())
+    assert folder_entity.file_path == "test-project/Plan.md"
+    assert folder_entity.permalink == "test-project/test-project/plan"
+
+    root_note = await client.post(
+        f"{v2_project_url}/knowledge/entities",
+        json={"title": "Plan", "directory": "/", "content": "At the root"},
+    )
+    assert root_note.status_code == 202, root_note.text
+    root_entity = EntityResponseV2.model_validate(root_note.json())
+    assert root_entity.file_path == "Plan.md"
+    assert root_entity.permalink == "test-project/plan"
+
+
 @pytest.mark.asyncio
 async def test_v2_endpoints_use_project_id_not_name(client: AsyncClient, test_project: Project):
     """Verify v2 endpoints require project external_id UUID, not name."""

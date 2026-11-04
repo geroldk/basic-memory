@@ -46,7 +46,8 @@ dependencies = [
     "fastembed>=0.7.4",
     "sqlite-vec>=0.1.6",
     "openai>=1.100.2",
-    "logfire>=4.19.0",
+    # The fastapi extra lets read-cache tests instrument the app as production does.
+    "logfire[fastapi]>=4.19.0",
     "psutil>=5.9.0",
     # uvloop's C event loop has no self._ready.popleft() codepath, so the
     # asyncpg engine-dispose race ("IndexError: pop from an empty deque") that
@@ -98,7 +99,6 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
-addopts = "--cov=basic_memory --cov-report term-missing"
 # plugins/ carries the co-located uv hook-script tests (one per script).
 testpaths = ["tests", "test-int", "plugins"]
 asyncio_mode = "strict"
@@ -136,8 +136,8 @@ select = ["E4", "E7", "E9", "F"]
 
 [dependency-groups]
 dev = [
-    "logfire>=4.19.0",
-    "gevent>=24.11.1",
+    # The fastapi extra lets read-cache tests instrument the app as production does.
+    "logfire[fastapi]>=4.19.0",
     "icecream>=2.1.3",
     "pytest>=8.3.4",
     "pytest-cov>=4.1.0",
@@ -231,11 +231,17 @@ all = "error"
 
 
 [tool.coverage.run]
-concurrency = ["thread", "gevent"]
+# Nothing in basic_memory uses gevent. Declaring it forced the slower C tracer on
+# every coverage run and doubled test time; sysmon (COVERAGE_CORE) needs it gone.
+concurrency = ["thread"]
 parallel = true
 source = ["basic_memory"]
 
 [tool.coverage.report]
+# A ratchet, not the goal: CI's combined coverage over all four suites measured
+# 96.34% when it started enforcing it (97.16% locally on macOS). Raise it as gaps
+# close; the target is 100%.
+fail_under = 96
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
