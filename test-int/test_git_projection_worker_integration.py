@@ -135,12 +135,12 @@ async def test_vector_failure_does_not_delay_newer_content_and_restart_resumes(
     entered, release = asyncio.Event(), asyncio.Event()
     apply = GitProjectionPipeline.apply
 
-    async def slow_vectors(self, stage, commit_id):
+    async def slow_vectors(self, stage, commit_id, *, graph_base_commit=None):
         if stage == "vectors":
             entered.set()
             await release.wait()
             raise RuntimeError("Embedding provider temporarily unavailable")
-        await apply(self, stage, commit_id)
+        await apply(self, stage, commit_id, graph_base_commit=graph_base_commit)
 
     monkeypatch.setattr(GitProjectionPipeline, "apply", slow_vectors)
     worker = GitProjectionWorker(pipeline, poll_interval=0.02)
@@ -188,13 +188,13 @@ async def test_cancelled_stage_is_retried_without_false_completion(
     entered = asyncio.Event()
     apply = GitProjectionPipeline.apply
 
-    async def interrupted(self, current_stage, commit_id):
+    async def interrupted(self, current_stage, commit_id, *, graph_base_commit=None):
         if current_stage == stage:
             if after_work:
-                await apply(self, current_stage, commit_id)
+                await apply(self, current_stage, commit_id, graph_base_commit=graph_base_commit)
             entered.set()
             await asyncio.Future()
-        await apply(self, current_stage, commit_id)
+        await apply(self, current_stage, commit_id, graph_base_commit=graph_base_commit)
 
     monkeypatch.setattr(GitProjectionPipeline, "apply", interrupted)
     worker = GitProjectionWorker(pipeline, poll_interval=0.02)
@@ -326,12 +326,12 @@ async def test_worker_owns_its_lifecycle_and_retries_checkpoint_failure(pipeline
     target = worker.progress.target
     failures = 0
 
-    async def unavailable_once(commit_id, *, vector_key):
+    async def unavailable_once(commit_id, *, vector_key, graph_key="1"):
         nonlocal failures
         if failures == 0:
             failures += 1
             raise OSError("Transient checkpoint storage failure")
-        await target(commit_id, vector_key=vector_key)
+        await target(commit_id, vector_key=vector_key, graph_key=graph_key)
 
     monkeypatch.setattr(worker.progress, "target", unavailable_once)
     async with worker.run():
@@ -358,11 +358,13 @@ async def test_target_advancing_at_checkpoint_boundary_is_coalesced(
         if not advanced:
             advanced = True
             commit_id = publish(pipeline, "Coalescedprobe")
-            await worker.progress.target(commit_id, vector_key=pipeline.vector_key)
+            await worker.progress.target(
+                commit_id, vector_key=pipeline.vector_key, graph_key=pipeline.graph_key
+            )
 
-    async def advance_before_begin(stage, commit_id):
+    async def advance_before_begin(stage, commit_id, *, reusable_commit=None):
         await advance_target()
-        return await begin(stage, commit_id)
+        return await begin(stage, commit_id, reusable_commit=reusable_commit)
 
     async def advance_before_finish(stage, commit_id, run_id, *, error=None):
         await advance_target()

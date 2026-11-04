@@ -21,6 +21,7 @@ class GitProjectProgress:
     source_commit: str
     stages: tuple[GitStageProgress, ...]
     vector_key: str
+    graph_key: str = "1"
 
     @property
     def caught_up(self) -> bool:
@@ -29,7 +30,14 @@ class GitProjectProgress:
             and stage.completed_commit == self.source_commit
             and stage.running_commit is None
             and stage.last_error is None
-            and stage.projection_key == (self.vector_key if stage.stage == "vectors" else "1")
+            and stage.projection_key
+            == (
+                self.vector_key
+                if stage.stage == "vectors"
+                else self.graph_key
+                if stage.stage == "graph"
+                else "1"
+            )
             for stage in self.stages
         )
 
@@ -72,6 +80,7 @@ class GitProjectionWorker:
             await asyncio.to_thread(self.pipeline.repository.head),
             await self.progress.read(),
             self.pipeline.vector_key,
+            self.pipeline.graph_key,
         )
 
     @asynccontextmanager
@@ -133,12 +142,16 @@ class GitProjectionWorker:
         await self.pipeline.require_registration()
         if not vectors:
             commit_id = await asyncio.to_thread(self.pipeline.repository.head)
-            await self.progress.target(commit_id, vector_key=self.pipeline.vector_key)
-        rows = {row.stage: row for row in await self.progress.read()}
+            await self.progress.target(
+                commit_id, vector_key=self.pipeline.vector_key, graph_key=self.pipeline.graph_key
+            )
         stages: tuple[GitProjectionStage, ...] = (
             ("vectors",) if vectors else ("content", "files", "graph")
         )
         for stage in stages:
+            # Content/layout recovery can invalidate graph reuse. Never claim an
+            # earlier cached basis after that SQL work has changed identities.
+            rows = {row.stage: row for row in await self.progress.read()}
             row = rows.get(stage)
             if row is None:
                 return True
@@ -150,13 +163,20 @@ class GitProjectionWorker:
                 and row.last_error is None
             ):
                 continue
-            run_id = await self.progress.begin(stage, row.target_commit)
+            run_id = await self.progress.begin(
+                stage, row.target_commit, reusable_commit=row.reusable_commit
+            )
             if run_id is None:
                 return False
             try:
                 gate = self.content_gate if stage == "content" else None
                 async with gate if gate is not None else nullcontext():
-                    await self.pipeline.apply(stage, row.target_commit)
+                    if stage == "graph":
+                        await self.pipeline.apply(
+                            stage, row.target_commit, graph_base_commit=row.reusable_commit
+                        )
+                    else:
+                        await self.pipeline.apply(stage, row.target_commit)
                     await self.pipeline.require_head(row.target_commit)
             except Exception as error:
                 await self.progress.finish(stage, row.target_commit, run_id, error=str(error))

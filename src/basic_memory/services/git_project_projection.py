@@ -22,6 +22,8 @@ from basic_memory.models import Entity
 from basic_memory.read_cache import ReadCacheInvalidator, invalidate_cache
 from basic_memory.repository.entity_repository import AcceptedPendingEntityWrite
 from basic_memory.repository.git_project_repository import GitProjectRepository
+from basic_memory.repository.git_graph_inputs import git_graph_identities_unchanged
+from basic_memory.repository.git_progress_repository import invalidate_git_graphs
 from basic_memory.repository.git_layout_repository import GitLayoutRepository, GitPreparedNote
 from basic_memory.repository.git_projection_repository import (
     GitProjectionConflict,
@@ -168,6 +170,19 @@ async def project_git_content(
                 "Published Git head advanced during projection; retry latest"
             )
         async with db.scoped_session(session_maker) as session:
+            if any(
+                note.content is None for note in local_notes
+            ) or not git_graph_identities_unchanged(
+                {
+                    note.file_path: note.content.markdown_content
+                    for note in local_notes
+                    if note.content is not None
+                },
+                {note.file_path: note.external_id for note in local_notes},
+                snapshot.files,
+                snapshot.manifest.note_ids,
+            ):
+                await invalidate_git_graphs(session)
             moved, removed = await layout.apply(session, expected=local_notes, target=prepared)
         changed += moved
         for local in local_notes:

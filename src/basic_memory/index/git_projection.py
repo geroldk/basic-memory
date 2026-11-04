@@ -29,6 +29,7 @@ from basic_memory.models import Entity, NoteContent, Project
 from basic_memory.read_cache import ReadCacheInvalidator, invalidate_cache
 from basic_memory.repository import EntityRepository, ObservationRepository, RelationRepository
 from basic_memory.repository.git_progress_repository import GitProjectionStage
+from basic_memory.repository.git_graph_inputs import git_graph_identities_unchanged
 from basic_memory.repository.git_layout_repository import GitLayoutRepository
 from basic_memory.repository.git_project_repository import GitProjectRepository, GitSnapshot
 from basic_memory.repository.git_projection_repository import GitProjectionConflict
@@ -42,6 +43,7 @@ from basic_memory.services import EntityService, FileService
 from basic_memory.services.git_project_projection import project_git_content
 from basic_memory.services.link_resolver import LinkResolver
 from basic_memory.services.search_service import SearchService
+from basic_memory.workspace_context import current_workspace_permalink_context
 
 
 class PublishedGitIndexWriter:
@@ -64,14 +66,35 @@ class GitProjectionPipeline:
     search_service: SearchService
     vector_key: str
     read_cache: ReadCacheInvalidator | None = None
+    graph_key: str = "1"
 
-    async def apply(self, stage: GitProjectionStage, commit_id: str) -> None:
+    async def apply(
+        self,
+        stage: GitProjectionStage,
+        commit_id: str,
+        *,
+        graph_base_commit: str | None = None,
+    ) -> None:
         await self.require_registration()
         if stage == "content":
             await self.recover_content(commit_id)
             return
 
         snapshot = await asyncio.to_thread(self.repository.snapshot, commit_id)
+        graph_paths: set[str] | None = None
+        if stage == "graph" and graph_base_commit is not None:
+            previous = await asyncio.to_thread(self.repository.snapshot, graph_base_commit)
+            if git_graph_identities_unchanged(
+                previous.files,
+                previous.manifest.note_ids,
+                snapshot.files,
+                snapshot.manifest.note_ids,
+            ):
+                graph_paths = {
+                    path
+                    for path, content in snapshot.files.items()
+                    if previous.files[path] != content
+                }
         invalidation = (
             invalidate_cache(self.read_cache, self.project_external_id)
             if self.read_cache is not None
@@ -84,6 +107,8 @@ class GitProjectionPipeline:
                 # A missing backend must remain visible as unavailable, never "ready".
                 raise GitProjectionConflict("Semantic backend unavailable; vectors remain pending")
             for note in snapshot.manifest.notes:
+                if graph_paths is not None and note.path not in graph_paths:
+                    continue
                 await self.require_head(commit_id)
                 async with self.session_maker() as session:
                     entity = await session.scalar(
@@ -269,6 +294,20 @@ def build_git_projection_pipeline(
         },
         sort_keys=True,
     )
+    workspace = current_workspace_permalink_context()
+    graph_key = json.dumps(
+        {
+            "version": 2,
+            "permalinks_include_project": app_config.permalinks_include_project,
+            "ensure_frontmatter_on_sync": app_config.ensure_frontmatter_on_sync,
+            "workspace": (
+                workspace.workspace_slug
+                if workspace is not None and workspace.should_prefix_permalinks
+                else None
+            ),
+        },
+        sort_keys=True,
+    )
     return GitProjectionPipeline(
         repository,
         project.id,
@@ -279,4 +318,5 @@ def build_git_projection_pipeline(
         search,
         vector_key,
         read_cache,
+        graph_key,
     )

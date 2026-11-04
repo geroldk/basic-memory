@@ -21,6 +21,7 @@ class GitProjectionProgress(Base):
     projection_key: Mapped[str] = mapped_column(Text)
     target_commit: Mapped[str] = mapped_column(String(40))
     completed_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reusable_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     running_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

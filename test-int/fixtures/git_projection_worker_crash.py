@@ -26,9 +26,13 @@ async def main() -> None:
     apply = GitProjectionPipeline.apply
 
     async def crash_after_work(
-        self: GitProjectionPipeline, stage: GitProjectionStage, commit_id: str
+        self: GitProjectionPipeline,
+        stage: GitProjectionStage,
+        commit_id: str,
+        *,
+        graph_base_commit: str | None = None,
     ) -> None:
-        await apply(self, stage, commit_id)
+        await apply(self, stage, commit_id, graph_base_commit=graph_base_commit)
         if stage == fault_stage:
             os._exit(73)
 

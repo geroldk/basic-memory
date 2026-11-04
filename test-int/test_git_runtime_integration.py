@@ -107,11 +107,11 @@ async def test_api_returns_during_blocked_graph_and_vectors(runtime, client, mon
     entered, release = asyncio.Event(), asyncio.Event()
     apply = GitProjectionPipeline.apply
 
-    async def slow_indexes(self, stage, commit_id):
+    async def slow_indexes(self, stage, commit_id, *, graph_base_commit=None):
         if stage in {"graph", "vectors"}:
             entered.set()
             await release.wait()
-        await apply(self, stage, commit_id)
+        await apply(self, stage, commit_id, graph_base_commit=graph_base_commit)
 
     async def forbidden_legacy_finish(self, result, cache_change):
         pytest.fail("Legacy graph/search work must not run on a Git response path")
@@ -562,3 +562,30 @@ async def test_clean_restart_preserves_synced_materialization_state(runtime):
             assert content is not None and content.file_write_status == "synced"
             assert content.file_version == content.db_version
         assert (await runtime.worker.status()).caught_up
+
+
+@pytest.mark.asyncio
+async def test_real_api_append_reindexes_only_the_changed_note(runtime, client, monkeypatch):
+    from basic_memory.index.local_dependencies import LocalMarkdownFileIndexer
+
+    async with runtime.run():
+        first = await runtime.accept(create_request(runtime, "First"))
+        await runtime.accept(create_request(runtime, "Second"))
+        await wait_ready(runtime)
+        assert first.project_change is not None
+        changed = first.project_change
+        calls = []
+        index = LocalMarkdownFileIndexer.index_file
+
+        async def record(self, path, *, source):
+            calls.append(path)
+            return await index(self, path, source=source)
+
+        monkeypatch.setattr(LocalMarkdownFileIndexer, "index_file", record)
+        response = await client.patch(
+            f"/v2/projects/{runtime.pipeline.project_external_id}/knowledge/entities/{changed.note_external_id}",
+            json={"operation": "append", "content": "\n- [fact] Apideltaprobe\n"},
+        )
+        assert response.status_code == 202, response.text
+        await wait_ready(runtime)
+        assert calls == [changed.file_path]

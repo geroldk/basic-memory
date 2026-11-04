@@ -30,6 +30,8 @@ from basic_memory.indexing.accepted_note_mutation_runner import (
 )
 from basic_memory.models import NoteContent
 from basic_memory.repository.git_layout_repository import GitLayoutRepository
+from basic_memory.repository.git_graph_inputs import git_graph_identities_unchanged
+from basic_memory.repository.git_progress_repository import invalidate_git_graphs
 from basic_memory.repository.git_project_repository import (
     GitPublication,
     GitPublicationConflict,
@@ -174,6 +176,10 @@ class GitProjectRuntime:
                             )
                         files[change.file_path] = content.markdown_content
                         note_ids[change.file_path] = note_id
+                    if not git_graph_identities_unchanged(
+                        base.files, base.manifest.note_ids, files, note_ids
+                    ):
+                        await invalidate_git_graphs(session)
                     prepared = await asyncio.to_thread(
                         repository.prepare,
                         transaction_id=uuid4(),

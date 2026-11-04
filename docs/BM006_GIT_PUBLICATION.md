@@ -1,6 +1,6 @@
 # BM-006: isolated Git publication, identity recovery and catch-up
 
-Status: five isolated implementation slices, 2026-11-04. This is experimental code on
+Status: six isolated implementation slices, 2026-11-04. This is experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. It is not enabled by
 configuration, dependency wiring, CLI, API or MCP. Existing projects and the running
 installation continue to use the existing write path.
@@ -195,7 +195,7 @@ instead of changing Git's bytes. Safe automatic adaptation remains future work.
 | --- | --- |
 | `content` | Exact current Git Markdown and portable UUIDs have reached SQL. |
 | `files` | Every note passed BM's guarded materializer and exact byte verification. |
-| `graph` | Every note explicitly ran graph/full-text indexing, including unchanged files. |
+| `graph` | Graph/full text converged through a full pass or a proven body-only delta. |
 | `vectors` | Every note completed vector synchronization or its explicit note opt-out. |
 
 Rows retain target SHA, last completely processed SHA, running SHA/attempt UUID,
@@ -224,7 +224,7 @@ Context exit cancels and awaits both tasks. SQL transactions do not span embeddi
 or Git/file I/O.
 
 `worker.status()` reports the current source SHA plus each stage's distinct target,
-completed and running SHA/error. `caught_up` also checks the active vector policy.
+completed and running SHA/error. `caught_up` also checks the active graph and vector policies.
 These are **historical whole-stage completion checkpoints**, not a promise that
 all rows remain on that revision during a newer partial pass. Ordinary V1 readers
 can still mix published revisions; private drafts are not inputs. No general V2
@@ -272,8 +272,9 @@ in this order:
    adoption primitive below preserves accepted-but-unwritten content, but does not
    stop legacy writers. Unindexed files, resources and noncanonical input remain
    protected. Define controlled root remapping. Index rewrites are refused;
-   automatic normalization adaptation is not implemented. Measure the
-   current whole-stage rebuild/catch-up cost before enabling it for real projects.
+   automatic normalization adaptation is not implemented. The body-only graph
+   delta is isolated below; content, files and vectors still require whole-project
+   traversal. Assess their measured catch-up cost before a productive pilot.
 2. Select the opt-in executor in controlled API/MCP lifespans/dependencies, expose
    honest public progress and reject remaining import/index/directory bypasses.
    Startup content recovery and the post-commit worker are isolated below; default
@@ -380,11 +381,63 @@ against the same Git/SQLite state. Background loops are paused only in the dying
 child to target the foreground commit boundary. This is not a TCP server or a
 power-loss proof. All ordinary tests use deterministic embeddings.
 
+## Safe body-only graph catch-up
+
+Migration `0045` adds a nullable `reusable_commit` to the local progress rows.
+Historical completion alone cannot justify skipping unchanged notes: an
+unacknowledged intermediate pass may already have replaced some graph rows.
+The graph attempt atomically claims its observed reusable basis and clears it
+**before** work begins. Only the same successful attempt restores it. Failed,
+cancelled or killed attempts therefore force a full retry, even if C restores
+the body from A after a partially indexed B. Late acknowledgements stay fenced.
+
+When UUIDs, paths and all frontmatter values are unchanged, the graph stage
+reindexes only notes whose Markdown bytes changed since that proven basis.
+It uses the same guarded single-file indexer, generation publisher and exact-byte
+checks. There is no replacement parser or independent FTS writer. Structural
+changes conservatively retain the existing full graph pass.
+
+Both SQL content/layout recovery and the optional mutation executor invalidate
+graph reuse before/in the transaction changing identities or frontmatter.
+Deleting and recreating an unchanged target between graph attempts thus cannot
+leave incoming links permanently unresolved. This also fences active graph and
+vector attempts across locally registered Git projects, since other projects'
+sources can reference changed targets. Their graph/vector completion is cleared;
+content/file checkpoints and independent Git publication bases are preserved.
+The worker rereads progress after content recovery and CAS-checks the graph basis
+when claiming work. No new row locks or planning-time locks are introduced.
+
+A separate graph policy key covers the implementation version, permalink policy,
+normalization and workspace prefix. Changing it rebuilds graph and vectors;
+changing only the embedding policy continues to invalidate vectors alone.
+Content, files and vectors still traverse the whole project in this slice.
+Registry renames, external writers and imports must be controlled or routed
+through equivalent invalidation at the future host boundary. During a mixed
+pilot this includes legacy projects referenced by converted projects: changing
+an unmanaged target must not silently bypass invalidation of its Git sources.
+
+`test-int/test_git_graph_delta_integration.py` exercises real graph/FTS/vectors,
+a failed intermediate pass, interpreter death after a delta but before its
+checkpoint, deletion before any graph attempt, target recreation and graph policy
+changes. A real API append regression verifies that an unchanged peer note is
+skipped. These are isolated SQLite proofs; normal host selection remains disabled.
+
+On the same private 593-note/5,981,450-byte corpus, one body edit indexed one
+graph source instead of 593. Graph/FTS stage time fell from 184.12 s to 3.23 s;
+the sum of Git publication and sequential projection stages fell from 234.38 s
+to 47.72 s. These are single comparison runs with deterministic vectors under
+the Jina-DE provider identity, not model-inference, API-response or percentile
+latency measurements. Full initial indexing still visits every note; observed
+differences in that initial run are not a delta-path speedup. SQL content, files
+and vectors account for the remaining whole-project work.
+
 ## Validation
 
-The isolated suite passes 204 cases; all 15 Git publication/projection/worker/
-adoption/runtime modules (including both migrations) have 1115/1115 executable
-lines covered. One statically unreachable exhaustive-match guard is excluded.
+The isolated suite and supplemental API/process checks verify 215 current cases;
+all 17 Git publication/projection/worker/adoption/runtime modules (including three
+migrations) have 1166/1166 executable lines covered. The main run passes 213 cases;
+three supplemental executions include one already-covered error case and two
+additional cases. One statically unreachable exhaustive-match guard is excluded.
 A further 132 existing write/read/materialization/authorship/BM-002/BM-003 regression
 cases pass. Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
@@ -401,19 +454,24 @@ python -m pytest tests/repository/test_git_publication.py \
   tests/index/test_git_project_ownership.py \
   tests/test_git_file_retirement_migration.py test-int/test_git_layout_integration.py \
   test-int/test_git_projection_worker_integration.py test-int/test_git_adoption_integration.py \
-  test-int/test_git_runtime_integration.py -q --no-cov
+  test-int/test_git_runtime_integration.py test-int/test_git_graph_delta_integration.py \
+  tests/test_git_graph_basis_migration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
+  src/basic_memory/alembic/versions/0045_add_git_graph_reusable_basis.py \
   tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
   tests/test_git_file_retirement_migration.py \
+  tests/test_git_graph_basis_migration.py \
   src/basic_memory/services/note_content_writes.py \
   test-int/test_git*.py test-int/fixtures/git*crash.py
 ty check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \
+  src/basic_memory/alembic/versions/0045_add_git_graph_reusable_basis.py \
   tests/{repository,services,schemas,index}/test_git*.py tests/test_git_projection_progress_migration.py \
   tests/test_git_file_retirement_migration.py \
+  tests/test_git_graph_basis_migration.py \
   src/basic_memory/services/note_content_writes.py \
   test-int/test_git*.py test-int/fixtures/git*crash.py
 ```
