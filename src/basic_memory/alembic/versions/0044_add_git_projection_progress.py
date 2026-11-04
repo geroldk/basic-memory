@@ -1,7 +1,7 @@
 """add git projection progress
 
-Revision ID: 0043
-Revises: 0042
+Revision ID: 0044
+Revises: 0043
 Create Date: 2026-11-03 21:10:54.083237
 
 """
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "0043"
-down_revision: Union[str, None] = "0042"
+revision: str = "0044"
+down_revision: Union[str, None] = "0043"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

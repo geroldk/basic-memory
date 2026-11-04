@@ -1,7 +1,7 @@
 """add git file retirement
 
-Revision ID: 0044
-Revises: 0043
+Revision ID: 0045
+Revises: 0044
 Create Date: 2026-11-03 22:16:51.467698
 
 """
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "0044"
-down_revision: Union[str, None] = "0043"
+revision: str = "0045"
+down_revision: Union[str, None] = "0044"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

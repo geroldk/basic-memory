@@ -13,13 +13,13 @@ def test_git_progress_migration_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("BASIC_MEMORY_CONFIG_DIR", str(tmp_path / "config"))
     path = tmp_path / "migration.db"
     config = sqlite_alembic_config(path)
-    command.upgrade(config, "0042")
+    command.upgrade(config, "0043")
     with closing(sqlite3.connect(path)) as connection:
         before = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-    command.upgrade(config, "0043")
+    command.upgrade(config, "0044")
     with closing(sqlite3.connect(path)) as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(git_projection_progress)")
@@ -39,7 +39,7 @@ def test_git_progress_migration_roundtrip(tmp_path, monkeypatch):
             "PRAGMA foreign_key_list(git_projection_progress)"
         ).fetchone()
         assert foreign_key[2] == "project" and foreign_key[6] == "CASCADE"
-    command.downgrade(config, "0042")
+    command.downgrade(config, "0043")
     with closing(sqlite3.connect(path)) as connection:
         after = {
             row[0]

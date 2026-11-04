@@ -15,7 +15,7 @@ def test_graph_basis_migration_retains_completion_but_requires_a_full_first_pass
     monkeypatch.setenv("BASIC_MEMORY_CONFIG_DIR", str(tmp_path / "config"))
     path = tmp_path / "graph.db"
     config = sqlite_alembic_config(path)
-    command.upgrade(config, "0044")
+    command.upgrade(config, "0045")
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             "INSERT INTO project (id, external_id, name, path, is_active, is_default, permalink, "
@@ -28,12 +28,12 @@ def test_graph_basis_migration_retains_completion_but_requires_a_full_first_pass
             ("a" * 40, "a" * 40),
         )
         connection.commit()
-    command.upgrade(config, "0045")
+    command.upgrade(config, "0046")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute(
             "SELECT completed_commit, reusable_commit FROM git_projection_progress"
         ).fetchone() == ("a" * 40, None)
-    command.downgrade(config, "0044")
+    command.downgrade(config, "0045")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT name FROM project WHERE id=42").fetchone() == ("graph",)
         assert connection.execute(
