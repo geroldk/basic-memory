@@ -14,6 +14,8 @@ from basic_memory.api.container import ApiContainer, installed_container
 from basic_memory.api.git_policy import enforce_git_api_policy
 from basic_memory.index.git_host import run_git_host
 from basic_memory.api.v2.routers.git_router import router as git_router
+from basic_memory.api.v2.routers.git_transaction_router import router as git_transaction_router
+from basic_memory.repository.git_transaction_repository import GitTransactionError
 from redis_fastapi.cache import add_redis_caching
 
 from basic_memory.read_cache.policy import READ_CACHE_MAX_PAYLOAD_BYTES
@@ -156,6 +158,7 @@ async def workspace_permalink_context_middleware(request: Request, call_next):
 
 
 app.include_router(git_router, prefix="/v2/projects/{project_id}")
+app.include_router(git_transaction_router, prefix="/v2/projects/{project_id}")
 
 # Include v2 routers FIRST (more specific paths must match before /{project} catch-all)
 app.include_router(v2_accepted_content, prefix="/v2/projects/{project_id}")
@@ -176,6 +179,15 @@ app.include_router(v2_scoped_search, prefix="/v2")
 app.include_router(v2_project, prefix="/proxy/projects")
 
 # V2 routers are the only public API surface
+
+
+@app.exception_handler(GitTransactionError)
+async def git_transaction_error_handler(request: Request, exc: GitTransactionError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": str(exc)},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.exception_handler(EntityAlreadyExistsError)

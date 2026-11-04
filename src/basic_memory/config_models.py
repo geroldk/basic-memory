@@ -206,6 +206,8 @@ class BasicMemoryConfig(BaseSettings):
             "completed controlled adoption and exclusion of external legacy writers."
         ),
     )
+    git_transaction_idle_seconds: int = Field(default=1800, gt=0)
+    git_transaction_retention_seconds: int = Field(default=604800, ge=0)
 
     # overridden by ~/.basic-memory/config.json
     log_level: str = "INFO"

@@ -1,6 +1,6 @@
 # BM-006: Git publication, recovery and opt-in local hosting
 
-Status: seven implementation slices, 2026-11-04. Experimental code on
+Status: eight implementation slices, 2026-11-04. Experimental code on
 `feat/bm006-git-publication`, based on `local/bm003-baseline`. API/MCP hosting can now
 select Git through explicit configuration after controlled adoption. The default
 configuration stays on the existing write path. No productive installation or
@@ -16,7 +16,7 @@ read APIs and general per-operation idempotency/replay are V2 work.
 
 Effective implicit writes produce one commit; unchanged bytes produce no empty
 commit. Explicit multi-note transactions have a fixed project base, keep private
-drafts without holding Git/SQL locks during agent work, and eventually publish one
+drafts without holding Git/SQL locks during agent work, and publish one
 commit. V1 rejects a changed base anywhere in that project. Commits in another
 project do not invalidate it. Offline divergence requires explicit review; no force
 push, timestamp winner or silent rebase is promised.
@@ -330,9 +330,21 @@ executor. It proves ordinary API/MCP publication/read/search/progress, blocked
 index return, startup recovery, topology refusal and independent repositories.
 Deterministic embeddings remain a pipeline test, not a model timing benchmark.
 
+## Explicit transactions
+
+[BM006_TRANSACTIONS.md](BM006_TRANSACTIONS.md) documents the implemented API and
+`bm_transaction` MCP tool: fixed bases, private own reads/writes, revision CAS,
+capability ownership, commit/rollback/status/keep-alive, configurable 30-minute
+inactivity and seven-day expired-draft retention. Source transfer freezes and pins
+B/D while a new independent draft starts on current C; nothing is copied or
+rebased automatically. Terminal evidence survives private-ref cleanup. Git
+publication returns before projection completion; general V2 replay and snapshot
+reads remain outside this interface. Existing implicit tools never join a draft
+through hidden state.
+
 ## Remaining before productive use
 
-The next implementation milestone is explicit transactions. Remaining
+The next implementation milestone is per-project offline Git synchronization. Remaining
 implementation and operational obligations include:
 
 1. Complete controlled first import/migration and operational host cutover. The isolated
@@ -350,12 +362,10 @@ implementation and operational obligations include:
    SQLite failure and whole-ASGI-process recovery behavior when wiring the host.
    Create/update/edit/move/delete are covered by the isolated executor; imports and
    bulk/directory operations must use the publisher or be refused before acceptance.
-4. Add explicit transaction API/state, fixed-base and own-draft reads, status,
-   keep-alive, 30-minute inactivity expiry and seven-day expired-draft retention.
-   Expiry never commits. Terminal evidence must survive draft cleanup. Conflict
-   transfer preserves old B/D, creates a new draft on C, explicitly carries B→D
-   under B→C, rechecks dependencies, and commits normally again; never silently
-   rebase or replay append. Preserve a protected source until transfer completes.
+4. Validate operational backup/restore of private transactions, source pins,
+   caller-held keys and terminal receipts. Measure retained-record maintenance
+   on the intended transaction history. The explicit API is implemented, but
+   branch-only cloning does not restore local operational state.
 5. Add per-project opportunistic offline synchronization, explicit divergence
    handling, clone/restore tests and recovery of local operational state. A
    conflict in one project must not block unrelated projects.
@@ -499,12 +509,13 @@ and vectors account for the remaining whole-project work.
 
 ## Validation
 
-The combined suite verifies 261 current Git, host and API/process cases, including
-46 new host contracts/integration cases. All 25 Git/host modules (including three
-migrations and the narrow follow-up protocol) have 1330/1330 executable lines
+The combined suite verifies 315 current Git, host, transaction and API/process cases,
+including 54 new transaction cases. All 31 Git/host/transaction modules (including three
+migrations and the narrow follow-up protocol) have 1909/1909 executable lines
 covered. One statically unreachable exhaustive-match guard remains excluded.
-A further 488 existing write/read/materialization/authorship/BM-002/BM-003,
-routing, lifecycle, configuration and tool-contract regression cases pass.
+A further 504 existing write/read/materialization/authorship/BM-002/BM-003,
+routing, lifecycle, configuration and tool-contract regression cases pass;
+85 manual/resource checks also pass.
 Changed-file Ruff/type checks and the isolated Doctor pass. Whole-tree
 type checking still reports the same 56 diagnostics as the verified baseline; it
 is not a clean full-tree type-check result.
@@ -522,7 +533,9 @@ python -m pytest tests/repository/test_git_publication.py \
   test-int/test_git_projection_worker_integration.py test-int/test_git_adoption_integration.py \
   test-int/test_git_runtime_integration.py test-int/test_git_graph_delta_integration.py \
   tests/test_git_graph_basis_migration.py tests/test_git_host_contracts.py \
-  test-int/test_git_host_integration.py -q --no-cov
+  test-int/test_git_host_integration.py tests/repository/test_git_transactions.py \
+  tests/schemas/test_git_transaction_controls.py \
+  test-int/test_git_transactions_integration.py -q --no-cov
 ruff check src/basic_memory/{repository,services,schemas,index,models}/git*.py \
   src/basic_memory/alembic/versions/0043_add_git_projection_progress.py \
   src/basic_memory/alembic/versions/0044_add_git_file_retirement.py \

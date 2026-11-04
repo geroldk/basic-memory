@@ -1,4 +1,4 @@
-"""Isolated Git publication primitive for BM-006; not enabled by the local runtime.
+"""Git publication primitives for the opt-in local BM-006 runtime.
 
 The published branch is authoritative. Private candidates never change that branch.
 A changed transaction's terminal evidence is in the published commit itself, so the
@@ -11,10 +11,11 @@ import asyncio
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from functools import partial
 from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
@@ -77,7 +78,12 @@ async def settle_git_publication(
     The caller still receives cancellation and must recover from durable Git.
     Repeated cancellation never detaches a thread that can still publish.
     """
-    task = asyncio.create_task(asyncio.to_thread(repository.publish, prepared))
+    return await settle_git_operation(partial(repository.publish, prepared))
+
+
+async def settle_git_operation[T](operation: Callable[[], T]) -> T:
+    """Finish a short filesystem mutation before its caller releases ownership."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
     cancelled: asyncio.CancelledError | None = None
     while not task.done():
         try:
@@ -206,6 +212,33 @@ class GitProjectRepository:
         commit_id = self.head() if commit_id is None else commit_id
         _require_commit_id(commit_id)
         self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
+        return self._read_snapshot(commit_id)
+
+    def candidate_snapshot(self, prepared: PreparedGitPublication) -> GitSnapshot:
+        """Read a retained private draft without allowing it into published readers."""
+        _require_commit_id(prepared.base_commit)
+        _require_commit_id(prepared.commit_id)
+        expected_ref = f"refs/bm/candidates/{prepared.transaction_id}/{prepared.commit_id}"
+        if (
+            prepared.candidate_ref != expected_ref
+            or self._git("rev-parse", "--verify", expected_ref).strip().decode("ascii")
+            != prepared.commit_id
+        ):
+            raise GitPublicationError("Private draft reference does not match its candidate")
+        return self._read_snapshot(prepared.commit_id)
+
+    def remove_candidates(self, transaction_id: UUID) -> None:
+        """Drop private retention only; published history and terminal receipts survive."""
+        refs = self._git(
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            f"refs/bm/candidates/{transaction_id}/",
+        ).decode("ascii")
+        for line in refs.splitlines():
+            reference, commit_id = line.split()
+            self._git("update-ref", "-d", reference, commit_id)
+
+    def _read_snapshot(self, commit_id: str) -> GitSnapshot:
         tree = self._git("ls-tree", "-r", "-z", "--full-tree", commit_id)
         files: dict[str, str] = {}
         manifest: GitProjectManifest | None = None
@@ -236,9 +269,14 @@ class GitProjectRepository:
         base_commit: str,
         files: Mapping[str, str],
         note_ids: Mapping[str, UUID],
+        message: str = "Publish Basic Memory notes",
     ) -> PreparedGitPublication:
         """Prepare a complete candidate without publishing bytes or holding a lock."""
         _require_commit_id(base_commit)
+        if not message.strip() or "Basic-Memory-Transaction:" in message or "\0" in message:
+            raise ValueError(
+                "Commit message must be nonempty and omit reserved transaction evidence"
+            )
         base = self.snapshot(base_commit)
         if set(note_ids) != set(files):
             raise ValueError("Every Markdown file requires exactly one explicit note identity")
@@ -268,7 +306,7 @@ class GitProjectRepository:
                 "-p",
                 base_commit,
                 input_bytes=(
-                    f"Publish Basic Memory notes\n\nBasic-Memory-Transaction: {transaction_id}\n"
+                    f"{message.strip()}\n\nBasic-Memory-Transaction: {transaction_id}\n"
                 ).encode(),
             )
             .strip()

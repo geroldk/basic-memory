@@ -19,6 +19,7 @@ from basic_memory.mcp.tools.projects import bm_project, bm_project_delete
 from basic_memory.mcp.tools.ranked_search import bm_search
 from basic_memory.mcp.tools.read import bm_read
 from basic_memory.mcp.tools.write import bm_write
+from basic_memory.mcp.tools.transactions import bm_transaction
 
 __all__ = [
     "bm_context",
@@ -34,4 +35,5 @@ __all__ = [
     "bm_schema",
     "bm_search",
     "bm_write",
+    "bm_transaction",
 ]

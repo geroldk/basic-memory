@@ -22,6 +22,7 @@ V1_TOOLS = {
     "bm_man",
     "bm_schema",
     "bm_project",
+    "bm_transaction",
 }
 # Pre-1.0 tool names; none may be callable on the 1.0 server.
 RETIRED_TOOLS = frozenset(

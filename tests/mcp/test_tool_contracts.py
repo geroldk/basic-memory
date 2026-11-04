@@ -13,6 +13,23 @@ from basic_memory.mcp.server import mcp
 
 
 EXPECTED_TOOL_SIGNATURES: dict[str, list[str]] = {
+    "bm_transaction": [
+        "command",
+        "transaction_id",
+        "transaction_key",
+        "expected_revision",
+        "identifier",
+        "content",
+        "destination",
+        "operation",
+        "view",
+        "message",
+        "source_transaction_id",
+        "source_key",
+        "source_revision",
+        "output_format",
+        "project",
+    ],
     "bm_context": [
         "identifier",
         "depth",
@@ -143,6 +160,7 @@ EXPECTED_TOOL_SIGNATURES: dict[str, list[str]] = {
 # every tool must set annotations.title and explicit readOnlyHint, destructiveHint, and
 # openWorldHint values.
 EXPECTED_TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
+    "bm_transaction": {"readOnlyHint": False, "destructiveHint": True},
     "bm_context": {"readOnlyHint": True, "destructiveHint": False},
     "bm_find": {"readOnlyHint": True, "destructiveHint": False},
     "bm_list": {"readOnlyHint": True, "destructiveHint": False},
@@ -174,6 +192,7 @@ EXPECTED_EDIT_NOTE_OPERATIONS = [
 
 
 TOOL_FUNCTIONS: dict[str, object] = {
+    "bm_transaction": tools.bm_transaction,
     "bm_context": tools.bm_context,
     "bm_find": tools.bm_find,
     "bm_list": tools.bm_list,

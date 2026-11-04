@@ -110,6 +110,8 @@ async def run_git_host(
                 read_cache=read_cache,
             ),
             dependencies,
+            transaction_idle_seconds=app_config.git_transaction_idle_seconds,
+            transaction_retention_seconds=app_config.git_transaction_retention_seconds,
         )
     async with AsyncExitStack() as stack:
         for runtime in runtimes.values():

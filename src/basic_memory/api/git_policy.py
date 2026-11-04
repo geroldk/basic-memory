@@ -15,6 +15,17 @@ GIT_NOTE_WRITES = frozenset(
         "move_entity",
     }
 )
+GIT_TRANSACTION_WRITES = frozenset(
+    {
+        "start_transaction",
+        "write_transaction_note",
+        "move_transaction_note",
+        "delete_transaction_note",
+        "keep_alive_transaction",
+        "commit_transaction",
+        "rollback_transaction",
+    }
+)
 
 
 async def enforce_git_api_policy(request: Request, app_config: AppConfigDep) -> None:
@@ -32,6 +43,8 @@ async def enforce_git_api_policy(request: Request, app_config: AppConfigDep) -> 
     if request.method in {"GET", "HEAD", "OPTIONS", "QUERY"}:
         return
     if module.endswith(".project_router") and name == "resolve_project_identifier":
+        return
+    if module.endswith(".git_transaction_router") and name in GIT_TRANSACTION_WRITES:
         return
     if module.endswith((".knowledge_router", ".note_write_router")) and name in GIT_NOTE_WRITES:
         return

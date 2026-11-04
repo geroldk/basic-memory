@@ -1,7 +1,7 @@
 """Opt-in Git acceptance for a lifecycle-owned, externally controlled local project.
 
-Normal API/MCP dependencies do not select this executor yet. The composition
-root must suppress legacy writers/materializers/imports before enabling it.
+Configured API/MCP hosts select this executor and its explicit transaction service.
+The composition root suppresses legacy writers/materializers/imports before admission.
 """
 
 import asyncio
@@ -45,6 +45,7 @@ from basic_memory.services.note_content_writes import (
     NoteContentPublicationConflict,
     NoteContentMutationServiceError,
 )
+from basic_memory.services.git_transactions import GitTransactionService
 
 
 class GitProjectRuntime:
@@ -62,6 +63,8 @@ class GitProjectRuntime:
         dependencies: AcceptedNoteMutationDependencies,
         *,
         poll_interval: float = 5,
+        transaction_idle_seconds: int = 1800,
+        transaction_retention_seconds: int = 604800,
     ) -> None:
         self.pipeline = pipeline
         self.dependencies = dependencies
@@ -72,6 +75,11 @@ class GitProjectRuntime:
         self._running = False
         self._sql_commit: str | None = None
         self.last_publication: GitPublication | None = None
+        self.transactions = GitTransactionService(
+            self,
+            idle_seconds=transaction_idle_seconds,
+            retention_seconds=transaction_retention_seconds,
+        )
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator["GitProjectRuntime"]:
@@ -79,6 +87,7 @@ class GitProjectRuntime:
             self._sql_commit = self.worker.startup_content_commit
             self._running = True
             try:
+                await self.transactions.maintain()
                 yield self
             finally:
                 self._running = False
@@ -87,15 +96,21 @@ class GitProjectRuntime:
                 async with self.gate:
                     pass
 
-    async def accept(self, request: AcceptedNoteMutationRequest) -> AcceptedNoteChange:
-        if request.project_external_id != self.pipeline.project_external_id:
-            raise GitProjectionConflict("Mutation belongs to a different Git project")
+    @asynccontextmanager
+    async def admission(self) -> AsyncIterator[None]:
+        """Short call ownership; explicit drafts release it between agent calls."""
         if not self._running:
             raise GitProjectionConflict("Git project is not accepting mutations")
         async with self.gate:
             if not self._running:
                 raise GitProjectionConflict("Git project stopped before mutation admission")
             await self.pipeline.require_registration()
+            yield
+
+    async def accept(self, request: AcceptedNoteMutationRequest) -> AcceptedNoteChange:
+        if request.project_external_id != self.pipeline.project_external_id:
+            raise GitProjectionConflict("Mutation belongs to a different Git project")
+        async with self.admission():
             repository = self.pipeline.repository
             # This immutable basis is captured before any runner/preparer reads SQL.
             base = await asyncio.to_thread(repository.snapshot)
