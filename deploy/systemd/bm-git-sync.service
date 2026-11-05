@@ -1,0 +1,14 @@
+# TEMPLATE, not installed by anything. Copy to ~/.config/systemd/user/ and adjust the paths.
+[Unit]
+Description=Basic Memory Git peer sync (one pass over all projects)
+After=basic-memory-mcp.service
+
+[Service]
+Type=oneshot
+# The tool's own Python has fastmcp. REPO is the checkout that holds scripts/git_sync_watch.py.
+ExecStart=%h/.local/share/uv/tools/basic-memory/bin/python %h/bm/code/basic-memory/scripts/git_sync_watch.py \
+  --notify-cmd "%h/bm/bin/bm-notify"
+# Exit status 3 means: at least one project needs a person. Systemd then lists the unit as failed.
+SuccessExitStatus=0
+TimeoutStartSec=300
+UMask=0077

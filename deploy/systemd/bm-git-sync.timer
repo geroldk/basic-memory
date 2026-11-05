@@ -1,0 +1,13 @@
+# TEMPLATE, not installed by anything.
+[Unit]
+Description=Run the Basic Memory Git peer sync every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Never two passes at once, never a catch-up burst after sleep.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
