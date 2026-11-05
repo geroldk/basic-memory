@@ -1,4 +1,4 @@
-"""Migration 0044 adds entity.embedded_checksum, backfills it, and indexes lagging notes."""
+"""Migration 0047 adds entity.embedded_checksum, backfills it, and indexes lagging notes."""
 
 from importlib import import_module
 
@@ -12,7 +12,7 @@ from tests.test_entity_file_path_conflict_keys_migration import (  # noqa: F401 
     migration_database,
 )
 
-migration = import_module("basic_memory.alembic.versions.0044_entity_embedded_checksum")
+migration = import_module("basic_memory.alembic.versions.0047_entity_embedded_checksum")
 PREVIOUS_REVISION = str(migration.down_revision)
 INDEX_NAME = "ix_entity_project_embedding_not_current"
 

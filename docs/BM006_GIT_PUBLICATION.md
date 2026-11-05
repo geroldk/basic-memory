@@ -530,7 +530,9 @@ restore target. Unpublished working files remain outside the restored indexed ro
 The fork merges upstream instead of rebasing published history. Upstream snapshot
 `26d0a966` adds its own revision 0043. In the merged experimental chain the three
 BM-006 migrations are 0044 (progress), 0045 (retirement) and 0046 (graph basis),
-with exactly one Alembic head. Earlier experimental databases using BM-006's old
+with exactly one Alembic head. Upstream later added its own `0044`
+(`entity_embedded_checksum`); it collided with BM-006's `0044`, so the fork carries it as
+`0047` after `0046` (released BM-006 revisions are never renumbered). Earlier experimental databases using BM-006's old
 0043–0045 numbering cannot be upgraded through this chain automatically. Use new
 disposable development databases; non-disposable databases require a separate,
 backed-up recovery operation. Never infer schema identity from a numeric revision

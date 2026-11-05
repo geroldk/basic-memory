@@ -21,8 +21,8 @@ current until its pending embedding pass runs and stamps the real value.
 A plain ALTER TABLE, not batch mode: ``entity`` carries generated columns, and SQLite's
 batch recreation emits them twice (see x7d8e9f0a1b2).
 
-Revision ID: 0044
-Revises: 0043
+Revision ID: 0047
+Revises: 0046
 Create Date: 2026-11-04 20:00:00.000000
 
 """
@@ -32,8 +32,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0044"
-down_revision: Union[str, None] = "0043"
+revision: str = "0047"
+down_revision: Union[str, None] = "0046"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
