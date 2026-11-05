@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import os
 import sys
 
 import pdf_inspector
@@ -140,6 +141,9 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Read PDF bytes from stdin and emit one validated JSON result to stdout."""
     args = _parse_args()
+    # The native extractor starts one rayon thread per core, each with its own stack. Under the
+    # address-space limit below that fails with EAGAIN on many-core hosts, so cap the pool first.
+    os.environ.setdefault("RAYON_NUM_THREADS", "2")
     apply_memory_limit(args.max_memory_bytes)
     apply_cpu_limit(args.cpu_seconds)
     result = inspect_pdf_bytes(
