@@ -17,6 +17,7 @@ schedule. Nothing here is installed automatically.
 | --- | --- | --- |
 | `equal`, `pushed`, `pulled` | never | normal |
 | `diverged`, `remote_rewritten` | at once | both sides published different history; a person reviews and publishes a merge (see "Divergence and reviewed recovery") |
+| `needs_review` | at once | merging is on (`git_sync_merge`), but notes conflict; the report names kinds and paths. Decide in the review package, then `bm_project(command="merge")` (see "Note-level merge"). `merged` is routine and silent |
 | `invalid_incoming`, `local_changed` | at once | the peer sent something invalid, or the local side moved during the attempt |
 | `transport`, `interrupted`, or the service not answering | after 3 passes in a row (`--tolerate`) | normal while offline |
 

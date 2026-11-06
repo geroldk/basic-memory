@@ -89,7 +89,7 @@ Attempts are a discriminated union:
 | Kind | Meaning |
 | --- | --- |
 | `running` | Attempt UUID/start time persisted; completion is not known. |
-| `completed` | Outcome `equal`, `pushed`, `pulled`, `diverged` or `remote_rewritten`. |
+| `completed` | Outcome `equal`, `pushed`, `pulled`, `diverged`, `remote_rewritten`, `merged` or `needs_review` (the last two only with `git_sync_merge`). A release that does not know them cannot load a record that holds one: roll back only after the next sync has replaced it. |
 | `failed` | Reason `transport`, `invalid_incoming`, `local_changed` or `interrupted`. |
 
 Every finished attempt also carries its finish time. Expected transport/validation
@@ -136,7 +136,51 @@ For published-history divergence, an operator/agent with explicit merge authorit
 
 This is a documented external review workflow, **not a new automatic merge API**.
 The integration test constructs an explicitly reviewed two-parent tree and proves
-subsequent normal convergence. A BM-native review/merge command is still future work.
+subsequent normal convergence. With `git_sync_merge` enabled, BM does the same itself
+(next section).
+
+## Note-level merge (`git_sync_merge`)
+
+Per project with a peer, `git_sync_merge[<project uuid>] = "auto"` makes a `diverged` sync
+merge instead of stopping. The default is off and then everything above applies unchanged.
+`remote_rewritten`, a history with more than one merge base and an invalid incoming
+history are never merged.
+
+**What is compared.** Each note by its UUID, as (path, bytes) in base, local and remote;
+never text lines. The manifest is rebuilt from the decisions. Changed on one side, the same
+change on both, deleted twice, added on one side, and move-on-one-side-plus-edit-on-the-other
+all merge by themselves. Four cases need a person: the same note changed differently, deleted
+against changed, moved to two places, and two notes on one path or permalink.
+
+**How it is published.** The device that sees `diverged` builds one commit with two parents
+(local first, remote second) and trailers `Basic-Memory-Merge`, `Basic-Memory-Merge-Base`
+(and `Basic-Memory-Review` after a decision). A single `update-ref` transaction moves `main`
+from the local tip to that commit and verifies the incoming ref still holds the merged remote
+tip; then it is pushed without force. If the local tip moved meanwhile the attempt fails
+`local_changed`; if the peer moved on, the push is refused (`transport`) and the next run
+merges again. The observed remote commit only advances after a successful push.
+
+**Conflicts.** Nothing is published. A review package is written to
+`<bare repo>/bm-merge-review/<local12>-<remote12>/`: `konflikte.json`, and per conflict and
+note `basis.md`, `lokal.md`, `fern.md` (plus `vorschlag.md`, a line-level reading aid with
+conflict marks, never applied automatically). The project waits; other projects keep
+syncing. `bm_project(command="status")` shows the open review (kinds and paths only).
+
+**Deciding.** Put a `decision` into each conflict of `konflikte.json`:
+
+| kind | decisions |
+| --- | --- |
+| `both_changed` | `{"action": "lokal"\|"fern"\|"beide"\|"bearbeitet"}` |
+| `delete_vs_change` | `lokal`, `fern`, `loeschen`, `behalten`, `bearbeitet` |
+| `moved_twice` | `lokal`, `fern`, `bearbeitet` (the latter also needs `"path"`) |
+| `path_collision`, `permalink_collision` | `{"notes": {"<uuid>": {"path": "new.md", "bearbeitet": true}}}` |
+
+`beide` keeps the local note and adds the remote version as a new note (`<name>-fern.md`,
+title and permalink marked). `bearbeitet` takes the text from `bearbeitet.md` next to the
+three versions. Then run `bm_project(command="merge", project=..., review=<id>)` on the local
+service. It is not reachable through the gateway. A decision is bound to the exact versions
+it was made for: if either tip moved, the package is rewritten, decisions whose versions
+are unchanged are carried over, and the command must be run again.
 
 A previously observed peer head must remain an ancestor of its new head. Rewinding,
 deleting or replacing that branch reports `remote_rewritten` repeatedly; it never

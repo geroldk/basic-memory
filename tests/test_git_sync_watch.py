@@ -36,7 +36,7 @@ class Peer:
         return answer
 
 
-@pytest.mark.parametrize("outcome", ["equal", "pushed", "pulled"])
+@pytest.mark.parametrize("outcome", ["equal", "pushed", "pulled", "merged"])
 async def test_healthy_outcomes_say_nothing(outcome: str) -> None:
     state: dict[str, Any] = {}
     messages, attention = await watch.run_once(["a"], Peer({"a": completed(outcome)}), state)
@@ -51,6 +51,23 @@ async def test_divergence_is_reported_at_once_and_only_once(outcome: str) -> Non
     assert attention == 1 and outcome in messages[0]
     again, attention = await watch.run_once(["a"], peer, state)
     assert again == [] and attention == 1
+
+
+async def test_needs_review_names_kinds_and_paths_but_no_contents() -> None:
+    answer = completed("needs_review") | {
+        "open_review": {
+            "id": "aaaaaaaaaaaa-bbbbbbbbbbbb",
+            "conflicts": {"both_changed": 2},
+            "paths": ["b.md", "x/a.md"],
+        }
+    }
+    state: dict[str, Any] = {}
+    messages, attention = await watch.run_once(["a"], Peer({"a": answer}), state)
+    assert attention == 1
+    assert "needs_review" in messages[0] and "both_changed=2" in messages[0]
+    assert "aaaaaaaaaaaa-bbbbbbbbbbbb" in messages[0] and "b.md, x/a.md" in messages[0]
+    cleared, attention = await watch.run_once(["a"], Peer({"a": completed("merged")}), state)
+    assert attention == 0 and "wieder in Ordnung" in cleared[0]
 
 
 @pytest.mark.parametrize("reason", ["invalid_incoming", "local_changed"])

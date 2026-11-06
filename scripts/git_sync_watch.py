@@ -8,6 +8,8 @@ What counts as needing attention:
 
 * ``diverged`` and ``remote_rewritten``: both sides published different history. Nothing is
   merged automatically; a person reviews and publishes a merge. Reported at once.
+* ``needs_review``: automatic merging is on, but notes conflict and a person decides (the
+  report names kinds and paths, never contents). A successful ``merged`` is routine and silent.
 * ``invalid_incoming`` and ``local_changed``: the peer sent something that failed validation,
   or the local side moved during the attempt. Reported at once.
 * ``transport`` and ``interrupted``: normal while offline. Reported only after
@@ -33,7 +35,13 @@ import subprocess
 import sys
 from typing import Any
 
-IMMEDIATE = {"diverged", "remote_rewritten", "invalid_incoming", "local_changed"}
+IMMEDIATE = {
+    "diverged",
+    "remote_rewritten",
+    "needs_review",
+    "invalid_incoming",
+    "local_changed",
+}
 TOLERATED = {"transport", "interrupted"}
 
 SyncCall = Callable[[str], Awaitable[dict[str, Any]]]
@@ -61,7 +69,11 @@ def classify(project: str, result: dict[str, Any], failures: int, tolerate: int)
     if kind == "completed":
         outcome = attempt.get("outcome")
         if outcome in IMMEDIATE:
-            return Verdict(project, outcome, f"outcome={outcome}")
+            review = result.get("open_review") or {}
+            counts = ", ".join(f"{k}={v}" for k, v in sorted(review.get("conflicts", {}).items()))
+            paths = ", ".join(review.get("paths", [])[:5])
+            extra = f" review={review['id']} {counts} [{paths}]" if review else ""
+            return Verdict(project, outcome, f"outcome={outcome}{extra}")
         return Verdict(project, None, f"outcome={outcome}")
     if kind == "failed":
         reason = attempt.get("reason")
