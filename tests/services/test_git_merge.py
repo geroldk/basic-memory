@@ -136,3 +136,22 @@ def test_result_is_independent_of_dict_order() -> None:
     first = merge({}, {A: X, B: ("b.md", doc("b"))}, {})
     second = merge({}, {B: ("b.md", doc("b")), A: X}, {})
     assert first.files == second.files and first.note_ids == second.note_ids
+
+
+def test_review_helpers_survive_a_failing_merge_file_and_a_missing_package(
+    monkeypatch, tmp_path
+) -> None:
+    import subprocess
+
+    import pytest
+
+    from basic_memory.services import git_merge_review as review
+
+    monkeypatch.setattr(
+        review.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 255, b"", b""),
+    )
+    with pytest.raises(OSError, match="merge-file"):
+        review._proposal("b", "l", "r")
+    assert review.read_review(tmp_path, "missing") is None

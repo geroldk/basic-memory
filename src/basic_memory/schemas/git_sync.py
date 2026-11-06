@@ -22,7 +22,9 @@ class SyncRunning(SyncAttemptBase):
 class SyncCompleted(SyncAttemptBase):
     kind: Literal["completed"] = "completed"
     finished_at: datetime
-    outcome: Literal["equal", "pushed", "pulled", "diverged", "remote_rewritten"]
+    outcome: Literal[
+        "equal", "pushed", "pulled", "diverged", "remote_rewritten", "merged", "needs_review"
+    ]
 
 
 class SyncFailed(SyncAttemptBase):
@@ -45,9 +47,18 @@ class GitSyncRecord(BaseModel):
     attempt: GitSyncAttempt | None = None
 
 
+class GitSyncReview(BaseModel):
+    """An open merge review: paths and counts only, never note contents."""
+
+    id: str
+    conflicts: dict[str, int]
+    paths: list[str]
+
+
 class GitSyncStatus(BaseModel):
     configured: bool
     local_commit: str
     observed_remote_commit: str | None
     relationship: Literal["unobserved", "equal", "ahead", "behind", "diverged"]
     last_attempt: GitSyncAttempt | None
+    open_review: GitSyncReview | None = None

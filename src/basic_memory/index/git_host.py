@@ -55,6 +55,8 @@ async def run_git_host(
     """
     if not set(app_config.git_sync_remotes) <= set(app_config.git_repositories):
         raise GitProjectionConflict("Git peers must refer to configured Git project UUIDs")
+    if not set(app_config.git_sync_merge) <= set(app_config.git_sync_remotes):
+        raise GitProjectionConflict("Git merge settings must refer to projects with a Git peer")
     if not app_config.git_repositories:
         yield None
         return
@@ -115,6 +117,7 @@ async def run_git_host(
             transaction_idle_seconds=app_config.git_transaction_idle_seconds,
             transaction_retention_seconds=app_config.git_transaction_retention_seconds,
             sync_remote=app_config.git_sync_remotes.get(UUID(project.external_id)),
+            sync_merge=app_config.git_sync_merge.get(UUID(project.external_id)) == "auto",
         )
     async with AsyncExitStack() as stack:
         for runtime in runtimes.values():

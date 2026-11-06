@@ -68,6 +68,7 @@ class GitProjectRuntime:
         transaction_idle_seconds: int = 1800,
         transaction_retention_seconds: int = 604800,
         sync_remote: GitSyncRemote | None = None,
+        sync_merge: bool = False,
     ) -> None:
         self.pipeline = pipeline
         self.dependencies = dependencies
@@ -83,7 +84,7 @@ class GitProjectRuntime:
             idle_seconds=transaction_idle_seconds,
             retention_seconds=transaction_retention_seconds,
         )
-        self.sync = GitSyncService(self, sync_remote)
+        self.sync = GitSyncService(self, sync_remote, merge=sync_merge)
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator["GitProjectRuntime"]:

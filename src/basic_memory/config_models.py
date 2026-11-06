@@ -213,6 +213,13 @@ class BasicMemoryConfig(BaseSettings):
         default_factory=dict,
         description="Optional private peer per Git project. Explicit opportunistic sync only.",
     )
+    git_sync_merge: dict[UUID, Literal["off", "auto"]] = Field(
+        default_factory=dict,
+        description=(
+            "Per project with a peer: 'auto' merges diverged histories note by note when no "
+            "note conflicts and otherwise writes a review package; default and 'off' only report."
+        ),
+    )
 
     # overridden by ~/.basic-memory/config.json
     log_level: str = "INFO"
