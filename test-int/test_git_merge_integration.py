@@ -383,3 +383,162 @@ async def test_merge_settings_must_refer_to_projects_with_a_peer(host_setup):
     with pytest.raises(GitProjectionConflict, match="merge settings"):
         async with run_git_host(config, factory):
             pytest.fail("Merge setting without a peer admitted")
+
+
+def _decide(host_setup, result, decisions):
+    """Fill in the package the way a person would; returns the package directory."""
+    directory = host_setup.repository.path / "bm-merge-review" / result.open_review.id
+    document = json.loads((directory / "konflikte.json").read_text())
+    for conflict, decision in zip(document["conflicts"], decisions, strict=True):
+        conflict["decision"] = decision
+    (directory / "konflikte.json").write_text(json.dumps(document))
+    return directory
+
+
+async def _conflicted(host_setup, merge_peer, local, remote, base=None):
+    """Diverge on `shared.md` with the given bodies and return the first needs_review status."""
+    from basic_memory.api.app import app
+
+    add(host_setup.repository, shared=base or "Base\n")
+    async with app.router.lifespan_context(app):
+        await sync_service(host_setup.project.external_id).synchronize()
+    local_tip = publish(host_setup.repository, {"shared.md": note("shared", local)})
+    remote_tip = publish(merge_peer, {"shared.md": note("shared", remote)})
+    return local_tip, remote_tip
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,expected", [("lokal", "Mine\n"), ("fern", "Theirs\n")])
+async def test_a_decision_picks_one_side_and_publishes_a_reviewed_merge(
+    host_setup, merge_peer, action, expected
+):
+    from basic_memory.api.app import app
+
+    local_tip, remote_tip = await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        _decide(host_setup, status, [{"action": action}])
+        result = await service.synchronize(review=status.open_review.id)
+        assert result.last_attempt.outcome == "merged"
+        head = host_setup.repository.head()
+        assert head == merge_peer.head()
+        assert host_setup.repository.snapshot().files == {"shared.md": note("shared", expected)}
+        message = host_setup.repository._git("show", "--no-patch", "--format=%B", head).decode()
+        assert "Basic-Memory-Review:" in message
+        assert host_setup.repository.is_ancestor(local_tip, head)
+        assert host_setup.repository.is_ancestor(remote_tip, head)
+        await converge(host_setup)
+
+
+@pytest.mark.asyncio
+async def test_both_keeps_the_remote_version_as_a_marked_second_note(host_setup, merge_peer):
+    from basic_memory.api.app import app
+
+    await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        _decide(host_setup, status, [{"action": "beide"}])
+        assert (await service.synchronize(review=status.open_review.id)).last_attempt.outcome == (
+            "merged"
+        )
+        files = host_setup.repository.snapshot().files
+        assert set(files) == {"shared.md", "shared-fern.md"}
+        assert files["shared.md"] == note("shared", "Mine\n")
+        assert (
+            "Theirs" in files["shared-fern.md"]
+            and "permalink: shared-fern" in files["shared-fern.md"]
+        )
+        await converge(host_setup)
+
+
+@pytest.mark.asyncio
+async def test_an_edited_text_is_taken_from_the_package(host_setup, merge_peer):
+    from basic_memory.api.app import app
+
+    await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        directory = _decide(host_setup, status, [{"action": "bearbeitet"}])
+        uuid = next((directory / "001").iterdir())
+        with pytest.raises(ValueError, match="bearbeitet.md is missing"):
+            await service.synchronize(review=status.open_review.id)
+        (uuid / "bearbeitet.md").write_text(note("shared", "Both\n"))
+        result = await service.synchronize(review=status.open_review.id)
+        assert result.last_attempt.outcome == "merged"
+        assert host_setup.repository.snapshot().files == {"shared.md": note("shared", "Both\n")}
+
+
+@pytest.mark.asyncio
+async def test_undecided_or_foreign_review_requests_are_refused_without_an_attempt(
+    host_setup, merge_peer
+):
+    from basic_memory.api.app import app
+
+    local_tip, _ = await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        before = status.last_attempt
+        with pytest.raises(ValueError, match="Undecided"):
+            await service.synchronize(review=status.open_review.id)
+        with pytest.raises(ValueError, match="Not a review package id"):
+            await service.synchronize(review="../../etc")
+        with pytest.raises(ValueError, match="missing or unreadable"):
+            await service.synchronize(review="0" * 12 + "-" + "0" * 12)
+        assert (await service.status()).last_attempt == before
+        assert host_setup.repository.head() == local_tip
+
+
+@pytest.mark.asyncio
+async def test_a_decision_made_for_old_versions_is_carried_not_applied(host_setup, merge_peer):
+    from basic_memory.api.app import app
+
+    await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        old = status.open_review.id
+        _decide(host_setup, status, [{"action": "lokal"}])
+        # Another unrelated note arrives on the peer after the decision was written.
+        add(merge_peer, extra="Extra\n")
+        moved = await service.synchronize(review=old)
+        assert moved.last_attempt.outcome == "needs_review"
+        assert moved.open_review.id != old
+        package = host_setup.repository.path / "bm-merge-review" / moved.open_review.id
+        carried = json.loads((package / "konflikte.json").read_text())["conflicts"][0]["decision"]
+        assert carried == {"action": "lokal"}  # versions unchanged, so the decision survives
+        done = await service.synchronize(review=moved.open_review.id)
+        assert done.last_attempt.outcome == "merged"
+        assert set(host_setup.repository.snapshot().files) == {"shared.md", "extra.md"}
+
+
+@pytest.mark.asyncio
+async def test_repeated_sync_runs_keep_the_decisions_already_entered(host_setup, merge_peer):
+    from basic_memory.api.app import app
+
+    await _conflicted(host_setup, merge_peer, "Mine\n", "Theirs\n")
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        status = await service.synchronize()
+        directory = _decide(host_setup, status, [{"action": "fern"}])
+        (next((directory / "001").iterdir()) / "bearbeitet.md").write_text("keep me")
+        again = await service.synchronize()
+        assert again.last_attempt.outcome == "needs_review"
+        document = json.loads((directory / "konflikte.json").read_text())
+        assert document["conflicts"][0]["decision"] == {"action": "fern"}
+        assert (next((directory / "001").iterdir()) / "bearbeitet.md").read_text() == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_merge_application_requires_the_switch(host_setup, merge_peer, config_manager):
+    from basic_memory.api.app import app
+
+    host_setup.config.git_sync_merge = {}
+    config_manager.save_config(host_setup.config)
+    async with app.router.lifespan_context(app):
+        service = sync_service(host_setup.project.external_id)
+        with pytest.raises(ValueError, match="not enabled"):
+            await service.synchronize(review="0" * 12 + "-" + "0" * 12)

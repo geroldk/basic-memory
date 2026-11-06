@@ -1,6 +1,7 @@
 """Explicit opportunistic sync. Network waits never hold local mutation admission."""
 
 import asyncio
+import re
 import subprocess
 from datetime import UTC, datetime
 from functools import partial
@@ -25,6 +26,12 @@ from basic_memory.schemas.git_sync import (
 )
 from basic_memory.schemas.git_project import GitNoteIdentity, GitProjectManifest
 from basic_memory.services.git_merge import plan_merge
+from basic_memory.services.git_merge_resolution import (
+    Resolved,
+    ReviewIncomplete,
+    require_decided,
+    resolve_package,
+)
 from basic_memory.services.git_merge_review import (
     REVIEW_DIRECTORY,
     read_review,
@@ -35,6 +42,9 @@ from basic_memory.services.git_transactions import validate_git_draft
 
 if TYPE_CHECKING:  # pragma: no cover
     from basic_memory.services.git_project_runtime import GitProjectRuntime
+
+
+_REVIEW_ID = re.compile(r"[0-9a-f]{12}-[0-9a-f]{12}\Z")
 
 
 class GitSyncBusy(RuntimeError):
@@ -101,7 +111,12 @@ class GitSyncService:
         )
 
     async def _merge(
-        self, attempt_id: UUID, local: str, remote: GitSnapshot, project_id: UUID
+        self,
+        attempt_id: UUID,
+        local: str,
+        remote: GitSnapshot,
+        project_id: UUID,
+        review: str | None = None,
     ) -> tuple[Literal["merged", "needs_review", "diverged"], str | None]:
         """Merge note by note; returns the outcome and the locally published merge, if any.
 
@@ -114,11 +129,32 @@ class GitSyncService:
             return "diverged", None  # criss-cross history: a person decides how to proceed
         base = await asyncio.to_thread(repository.read_snapshot, bases[0])
         left = await asyncio.to_thread(repository.read_snapshot, local)
+        root = repository.path / REVIEW_DIRECTORY
+        resolved: Resolved | None = None
         plan = plan_merge(base, left, remote)
+        if review is not None:
+            package = root / review
+            document = await asyncio.to_thread(require_decided, package)
+            if (document["local"], document["remote"]) != (local, remote.commit_id):
+                # A tip moved since the decisions were made: carry over what still applies
+                # and ask again, never apply a decision to versions its author did not see.
+                await asyncio.to_thread(
+                    write_review_package,
+                    root,
+                    project_id=project_id,
+                    base=base,
+                    local=left,
+                    remote=remote,
+                    plan=plan,
+                    previous=package,
+                )
+                return "needs_review", None
+            resolved = await asyncio.to_thread(resolve_package, package, base, left, remote)
+            plan = plan_merge(base, left, remote, decided=resolved.decided)
         if plan.conflicts:
             await asyncio.to_thread(
                 write_review_package,
-                repository.path / REVIEW_DIRECTORY,
+                root,
                 project_id=project_id,
                 base=base,
                 local=left,
@@ -136,6 +172,8 @@ class GitSyncService:
                 remote=remote,
                 files=plan.files,
                 note_ids=plan.note_ids,
+                reviewed=resolved.reviewed if resolved else frozenset(),
+                review_id=resolved.review_id if resolved else None,
             )
         )
         manifest = GitProjectManifest(
@@ -150,9 +188,18 @@ class GitSyncService:
             await settle_git_operation(partial(repository.publish_merge, merge))
         return "merged", merge.commit_id
 
-    async def synchronize(self) -> GitSyncStatus:
+    async def synchronize(self, *, review: str | None = None) -> GitSyncStatus:
         if self.remote is None:
             raise ValueError("No Git peer configured for this project")
+        if review is not None:
+            if not self.merge:
+                raise ValueError("Merge is not enabled for this project")
+            if _REVIEW_ID.fullmatch(review) is None:
+                raise ValueError("Not a review package id")
+            await asyncio.to_thread(
+                require_decided,
+                self.runtime.pipeline.repository.path / REVIEW_DIRECTORY / review,
+            )
         if self.lock.locked():
             raise GitSyncBusy("A sync attempt is already running for this project")
         async with self.lock:
@@ -165,6 +212,7 @@ class GitSyncService:
                 await self.save(record)
             repository = self.runtime.pipeline.repository
             failure_reason = "transport"
+            refused: ReviewIncomplete | None = None
             try:
                 incoming = await settle_git_operation(
                     partial(repository.fetch_published, self.remote.url, attempt.attempt_id)
@@ -224,7 +272,7 @@ class GitSyncService:
                         assert incoming is not None and validated_tip is not None
                         failure_reason = "invalid_incoming"
                         outcome, merged = await self._merge(
-                            attempt.attempt_id, local, validated_tip, record.project_id
+                            attempt.attempt_id, local, validated_tip, record.project_id, review
                         )
                         if merged is not None:
                             # Published locally; if the push fails the next run sees `ahead`,
@@ -269,6 +317,8 @@ class GitSyncService:
             ) as error:
                 if isinstance(error, GitPublicationConflict):
                     failure_reason = "local_changed"
+                if isinstance(error, ReviewIncomplete):
+                    refused = error  # the caller must see why its decisions were not applied
                 record = record.model_copy(
                     update={
                         "attempt": SyncFailed(
@@ -284,4 +334,6 @@ class GitSyncService:
                 # The ordinary worker re-reads canonical main, never incoming refs.
                 self.runtime.worker.notify()
             await self.save(record)
+            if refused is not None:
+                raise refused
             return await self.status()

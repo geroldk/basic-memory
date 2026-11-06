@@ -240,6 +240,16 @@ class ProjectClient:
         response = await call_post(self.http_client, f"/v2/projects/{project_external_id}/git/sync")
         return GitSyncStatus.model_validate(response.json())
 
+    async def merge_git(self, project_external_id: str, review: str) -> GitSyncStatus:
+        from basic_memory.mcp.tools.utils import call_post
+
+        response = await call_post(
+            self.http_client,
+            f"/v2/projects/{project_external_id}/git/merge",
+            json={"review": review},
+        )
+        return GitSyncStatus.model_validate(response.json())
+
     async def get_doctor_report(self, project_external_id: str) -> ProjectDoctorReport:
         """Report a project's problems and their repairs without changing the project."""
         from basic_memory.mcp.tools.utils import call_get

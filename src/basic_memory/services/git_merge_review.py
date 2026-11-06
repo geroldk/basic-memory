@@ -9,15 +9,22 @@ are written here and nowhere else; reports and status carry only paths and count
 from __future__ import annotations
 
 import hashlib
+import shutil
 import json
 import os
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from uuid import UUID
 
 from basic_memory.repository.git_project_repository import GitSnapshot
 from basic_memory.schemas.git_sync import GitSyncReview
+from basic_memory.services.git_merge_resolution import (
+    EDITED_FILE,
+    conflict_key,
+    load_document,
+)
 from basic_memory.services.git_merge import MergePlan, NoteState, note_states
 
 REVIEW_DIRECTORY = "bm-merge-review"
@@ -73,10 +80,23 @@ def write_review_package(
     local: GitSnapshot,
     remote: GitSnapshot,
     plan: MergePlan,
+    previous: Path | None = None,
 ) -> Path:
-    """Write (or rewrite, idempotently) the package for exactly this pair of tips."""
-    states = {"base": note_states(base), "local": note_states(local), "remote": note_states(remote)}
+    """Write (or rewrite, idempotently) the package for exactly this pair of tips.
+
+    `previous` is an older package of the same project: decisions (and finished texts) for
+    conflicts whose versions are unchanged are carried over, all others start undecided.
+    """
+    carried: dict[str, tuple[dict[str, Any], Path]] = {}
     directory = root / review_id(local.commit_id, remote.commit_id)
+    # A repeated sync run for the same pair of tips must never wipe decisions already entered.
+    if previous is None and (directory / "konflikte.json").exists():
+        previous = directory
+    if previous is not None:
+        for old in load_document(previous)["conflicts"]:
+            if old.get("decision"):
+                carried[conflict_key(old)] = (old["decision"], previous / f"{old['number']:03d}")
+    states = {"base": note_states(base), "local": note_states(local), "remote": note_states(remote)}
     directory.mkdir(parents=True, exist_ok=True)
     conflicts = []
     for number, conflict in enumerate(plan.conflicts, start=1):
@@ -93,27 +113,34 @@ def write_review_package(
                     for side in ("base", "local", "remote")
                 ]
                 (note_dir / "vorschlag.md").write_text(_proposal(*texts), encoding="utf-8")
-        conflicts.append(
-            {
-                "number": number,
-                "kind": conflict.kind,
-                "notes": [
-                    {
-                        "external_id": str(external_id),
-                        "paths": {
-                            side: state.path
-                            for side in ("base", "local", "remote")
-                            if (state := states[side].get(external_id)) is not None
-                        },
-                        "sha256": {
-                            side: _digest(states[side].get(external_id))
-                            for side in ("base", "local", "remote")
-                        },
-                    }
-                    for external_id in conflict.external_ids
-                ],
-            }
-        )
+        entry = {
+            "number": number,
+            "kind": conflict.kind,
+            "notes": [
+                {
+                    "external_id": str(external_id),
+                    "paths": {
+                        side: state.path
+                        for side in ("base", "local", "remote")
+                        if (state := states[side].get(external_id)) is not None
+                    },
+                    "sha256": {
+                        side: _digest(states[side].get(external_id))
+                        for side in ("base", "local", "remote")
+                    },
+                }
+                for external_id in conflict.external_ids
+            ],
+            "decision": None,
+        }
+        if (kept := carried.get(conflict_key(entry))) is not None:
+            entry["decision"] = kept[0]
+            for external_id in conflict.external_ids:
+                source = kept[1] / str(external_id) / EDITED_FILE
+                destination = entry_dir / str(external_id) / EDITED_FILE
+                if source.is_file() and source != destination:
+                    shutil.copyfile(source, destination)
+        conflicts.append(entry)
     document = {
         "format_version": REVIEW_FORMAT,
         "project_id": str(project_id),

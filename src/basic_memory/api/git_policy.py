@@ -46,7 +46,7 @@ async def enforce_git_api_policy(request: Request, app_config: AppConfigDep) -> 
         return
     if module.endswith(".git_transaction_router") and name in GIT_TRANSACTION_WRITES:
         return
-    if module.endswith(".git_router") and name == "sync_git_project":
+    if module.endswith(".git_router") and name in {"sync_git_project", "merge_git_project"}:
         return
     if module.endswith((".knowledge_router", ".note_write_router")) and name in GIT_NOTE_WRITES:
         return

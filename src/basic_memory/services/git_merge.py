@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
@@ -59,7 +60,7 @@ def note_states(snapshot: GitSnapshot) -> dict[UUID, NoteState]:
     }
 
 
-def _pick[T](base: T, local: T, remote: T) -> tuple[T, bool]:
+def pick[T](base: T, local: T, remote: T) -> tuple[T, bool]:
     """Three-way choice for one component; the flag says both sides changed it differently."""
     if local == remote or remote == base:
         return local, False
@@ -68,7 +69,7 @@ def _pick[T](base: T, local: T, remote: T) -> tuple[T, bool]:
     return base, True
 
 
-def _merge_note(
+def merge_note(
     external_id: UUID,
     base: NoteState | None,
     local: NoteState | None,
@@ -89,8 +90,8 @@ def _merge_note(
         kind: ConflictKind = "both_changed" if base is None else "delete_vs_change"
         return None, MergeConflict(kind, (external_id,), sides)
     # Case 5 and 6 and 8: path and bytes are separate components.
-    path, moved_twice = _pick(base.path, local.path, remote.path)
-    content, both_changed = _pick(base.content, local.content, remote.content)
+    path, moved_twice = pick(base.path, local.path, remote.path)
+    content, both_changed = pick(base.content, local.content, remote.content)
     if moved_twice:
         return None, MergeConflict("moved_twice", (external_id,), sides)
     if both_changed:
@@ -110,21 +111,27 @@ def plan_merge(
     base: GitSnapshot,
     local: GitSnapshot,
     remote: GitSnapshot,
+    *,
+    decided: Mapping[UUID, NoteState | None] = MappingProxyType({}),
 ) -> MergePlan:
     """Decide every note, then check the result tree as a whole (cases 9 and 10).
 
-    Projects with a different UUID or manifest format cannot be merged (case 13) and are the
+    `decided` holds a person's final state per note (None deletes it); those notes skip the
+    automatic rules, new UUIDs among them are added. Projects with a different UUID or manifest format cannot be merged (case 13) and are the
     caller's concern: the incoming-history check already rejects a foreign project.
     """
     states = [note_states(snapshot) for snapshot in (base, local, remote)]
     merged: dict[UUID, NoteState] = {}
     conflicts: list[MergeConflict] = []
-    for external_id in sorted({*states[0], *states[1], *states[2]}, key=str):
-        decided, conflict = _merge_note(external_id, *(side.get(external_id) for side in states))
+    for external_id in sorted({*states[0], *states[1], *states[2], *decided}, key=str):
+        if external_id in decided:
+            result, conflict = decided[external_id], None
+        else:
+            result, conflict = merge_note(external_id, *(side.get(external_id) for side in states))
         if conflict is not None:
             conflicts.append(conflict)
-        elif decided is not None:
-            merged[external_id] = decided
+        elif result is not None:
+            merged[external_id] = result
     by_path: dict[str, list[UUID]] = defaultdict(list)
     by_permalink: dict[str, list[UUID]] = defaultdict(list)
     for external_id, note in merged.items():

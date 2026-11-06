@@ -36,7 +36,7 @@ from basic_memory.mcp.tools.recent_activity import RecentRows, recent_activity_p
 from basic_memory.mcp.clients.project import ProjectClient
 from basic_memory.mcp.project_context import get_project_client
 
-type ProjectCommand = Literal["list", "create", "recent", "status", "sync"]
+type ProjectCommand = Literal["list", "create", "recent", "status", "sync", "merge"]
 
 Workspace = Annotated[
     str | None,
@@ -53,7 +53,9 @@ Workspace = Annotated[
         "lately in the required `project`: `since`, `items`, paging); status "
         "(local Git publication, indexes and last peer observation); sync "
         "(explicit peer fetch/push for the required local Git project; may apply note "
-        "deletions from published peer history; divergence stops)."
+        "deletions from published peer history; divergence stops unless merging is enabled); "
+        "merge (local only: apply the decisions a person entered in a Git merge review "
+        "package, `review` = its id from status)."
     ),
     tags={"projects"},
     annotations={
@@ -87,6 +89,9 @@ async def bm_project(
     ] = False,
     workspace: Workspace = None,
     since: Since = "7d",
+    review: Annotated[
+        str | None, Field(min_length=1, description="For merge: the review package id.")
+    ] = None,
     items: Items = None,
     page: Page = 1,
     page_size: PageSize = 10,
@@ -110,6 +115,22 @@ async def bm_project(
             if output_format == "json":
                 return sync.model_dump(mode="json")
             return sync.model_dump_json(indent=2)
+        case "merge":
+            if project is None or review is None:
+                raise refusal(
+                    "INVALID_ARGUMENTS",
+                    "merge needs `project` and `review`.",
+                    output_format=output_format,
+                )
+            project_name, project_id = routing_arguments(parse_project(project))
+            async with get_project_client(project_name, context=context, project_id=project_id) as (
+                client,
+                active_project,
+            ):
+                merged = await ProjectClient(client).merge_git(active_project.external_id, review)
+            if output_format == "json":
+                return merged.model_dump(mode="json")
+            return merged.model_dump_json(indent=2)
         case "status":
             if project is None:
                 raise refusal(
@@ -137,6 +158,11 @@ async def bm_project(
                 lines.append(f"Peer (last observation): {status.synchronization.relationship}")
                 if status.synchronization.last_attempt is not None:
                     lines.append(status.synchronization.last_attempt.model_dump_json())
+                if (open_review := status.synchronization.open_review) is not None:
+                    lines.append(
+                        f"Merge review {open_review.id} open: {open_review.conflicts} "
+                        f"in {', '.join(open_review.paths)}"
+                    )
             return "\n".join(lines)
         case "list":
             return await list_memory_projects(output_format=output_format, context=context)
