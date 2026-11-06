@@ -173,7 +173,9 @@ class McpTransport:  # pragma: no cover
         return await self._json({"command": "sync", "project": project})
 
     async def names(self) -> list[str]:
-        return [entry["name"] for entry in await self._json({"command": "list"})]
+        # bm_project(list) answers {"projects": [...]}, not a bare list.
+        answer = await self._json({"command": "list"})
+        return [entry["name"] for entry in answer["projects"]]
 
 
 async def main_async(args: argparse.Namespace) -> int:  # pragma: no cover
