@@ -451,7 +451,9 @@ class GitProjectRepository:
         validate_note_path(path)
         self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
         blob = self._git("hash-object", "--stdin", input_bytes=content.encode("utf-8")).strip()
-        objects = self._git("rev-list", "--objects", "--no-object-names", commit_id, "--", path)
+        objects = self._git(
+            "rev-list", "--full-history", "--objects", "--no-object-names", commit_id, "--", path
+        )
         return blob in objects.splitlines()
 
     def contains_published_note_identity(
@@ -461,8 +463,12 @@ class GitProjectRepository:
         _require_commit_id(commit_id)
         validate_note_path(path)
         self._git("merge-base", "--is-ancestor", commit_id, PUBLISHED_REF)
+        # --full-history: a merge that is TREESAME to one parent would otherwise hide every
+        # commit on the other parent, and a host whose own edit lives there could not prove it.
         commits = (
-            self._git("rev-list", commit_id, "--", path, GIT_PROJECT_MANIFEST_PATH)
+            self._git(
+                "rev-list", "--full-history", commit_id, "--", path, GIT_PROJECT_MANIFEST_PATH
+            )
             .decode("ascii")
             .splitlines()
         )
