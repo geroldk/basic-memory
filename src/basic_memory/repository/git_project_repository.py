@@ -29,6 +29,8 @@ from basic_memory.schemas.git_project import (
 
 PUBLISHED_REF = "refs/heads/main"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}\Z")
+# Basic-Memory-* trailers are evidence written only by BM itself, never by a caller's message.
+_RESERVED_TRAILER = re.compile(r"^Basic-Memory-[A-Za-z-]+:", re.MULTILINE)
 
 
 class GitPublicationError(RuntimeError):
@@ -58,6 +60,15 @@ class PreparedGitPublication:
     commit_id: str
     candidate_ref: str
     changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedGitMerge:
+    attempt_id: UUID
+    base_commit: str
+    local_commit: str
+    remote_commit: str
+    commit_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +306,142 @@ class GitProjectRepository:
             f"{commit_id}:{PUBLISHED_REF}",
         )
 
+    def merge_bases(self, left: str, right: str) -> list[str]:
+        """All best common ancestors; more than one means a criss-cross history."""
+        _require_commit_id(left)
+        _require_commit_id(right)
+        return self._git("merge-base", "--all", left, right).decode("ascii").split()
+
+    def read_snapshot(self, commit_id: str) -> GitSnapshot:
+        """Read any retained commit (e.g. a fetched incoming one), not only published ancestry."""
+        _require_commit_id(commit_id)
+        return self._read_snapshot(commit_id)
+
+    def prepare_merge(
+        self,
+        *,
+        attempt_id: UUID,
+        base: GitSnapshot,
+        local: GitSnapshot,
+        remote: GitSnapshot,
+        files: Mapping[str, str],
+        note_ids: Mapping[str, UUID],
+        reviewed: frozenset[UUID] = frozenset(),
+        review_id: UUID | None = None,
+    ) -> PreparedGitMerge:
+        """Build a two-parent merge commit (local first) without publishing it.
+
+        Every note must come from a parent unless a person reviewed it, and no path may
+        silently change owner relative to either parent.
+        """
+        if set(note_ids) != set(files):
+            raise ValueError("Every Markdown file requires exactly one explicit note identity")
+        parents = {local.commit_id, remote.commit_id}
+        if len(parents) != 2 or base.commit_id in parents:
+            raise ValueError("A merge needs two distinct tips and a distinct base")
+        if len({base.manifest.project_external_id, local.manifest.project_external_id}) != 1 or (
+            remote.manifest.project_external_id != local.manifest.project_external_id
+        ):
+            raise ValueError("Merge histories belong to different projects")
+        self._require_note_provenance(local, remote, files, note_ids, reviewed)
+        self._require_stable_path_owners(local, remote, note_ids)
+        manifest = GitProjectManifest(
+            project_external_id=local.manifest.project_external_id,
+            notes=tuple(GitNoteIdentity(path=path, external_id=note_ids[path]) for path in files),
+        )
+        tree = self._write_tree({**files, GIT_PROJECT_MANIFEST_PATH: manifest.canonical_json()})
+        trailers = (
+            f"Basic-Memory-Merge: {attempt_id}\nBasic-Memory-Merge-Base: {base.commit_id}\n"
+            + (f"Basic-Memory-Review: {review_id}\n" if review_id is not None else "")
+        )
+        commit_id = (
+            self._git(
+                "commit-tree",
+                tree,
+                "-p",
+                local.commit_id,
+                "-p",
+                remote.commit_id,
+                input_bytes=f"Merge diverged Basic Memory histories\n\n{trailers}".encode(),
+            )
+            .strip()
+            .decode("ascii")
+        )
+        self._git("update-ref", f"refs/bm/merges/{attempt_id}", commit_id)
+        return PreparedGitMerge(
+            attempt_id, base.commit_id, local.commit_id, remote.commit_id, commit_id
+        )
+
+    @staticmethod
+    def _require_note_provenance(
+        local: GitSnapshot,
+        remote: GitSnapshot,
+        files: Mapping[str, str],
+        note_ids: Mapping[str, UUID],
+        reviewed: frozenset[UUID],
+    ) -> None:
+        """Path and bytes of each note stem from a parent; only reviewed notes are exempt."""
+        sides = (local, remote)
+        paths = {i: {s.manifest.note_ids_by_uuid.get(i) for s in sides} for i in note_ids.values()}
+        bytes_ = {
+            i: {
+                s.files[s.manifest.note_ids_by_uuid[i]]
+                for s in sides
+                if i in s.manifest.note_ids_by_uuid
+            }
+            for i in note_ids.values()
+        }
+        for path, external_id in note_ids.items():
+            if external_id in reviewed:
+                continue
+            if path not in paths[external_id] or files[path] not in bytes_[external_id]:
+                raise ValueError(f"Merged note {external_id} does not come from either parent")
+
+    @staticmethod
+    def _require_stable_path_owners(
+        local: GitSnapshot, remote: GitSnapshot, note_ids: Mapping[str, UUID]
+    ) -> None:
+        """A parent's path may get a new owner only by permutation or if the other parent agrees."""
+        for parent, other in ((local, remote), (remote, local)):
+            for path, owner in parent.manifest.note_ids.items():
+                new = note_ids.get(path)
+                if new is None or new == owner or other.manifest.note_ids.get(path) == new:
+                    continue
+                if owner not in note_ids.values() or new not in parent.manifest.note_ids.values():
+                    raise ValueError(
+                        "An existing note path cannot silently acquire a different identity"
+                    )
+
+    def publish_merge(self, merge: PreparedGitMerge) -> None:
+        """One guarded ref update: main moves from the local tip to the merge, nowhere else.
+
+        The incoming ref must still hold the remote tip that was merged, so a concurrent
+        sync attempt or a ref reset cannot slip another history in.
+        """
+        for commit in (merge.commit_id, merge.local_commit, merge.remote_commit):
+            _require_commit_id(commit)
+        if self.head() == merge.commit_id:
+            return  # the previous attempt published it and lost only the answer
+        parents = self._git("rev-list", "--parents", "-n", "1", merge.commit_id).split()
+        if [part.decode("ascii") for part in parents] != [
+            merge.commit_id,
+            merge.local_commit,
+            merge.remote_commit,
+        ]:
+            raise GitPublicationError("Merge commit does not have the expected parents")
+        commands = (
+            "start\n"
+            f"verify refs/bm/incoming/{merge.attempt_id} {merge.remote_commit}\n"
+            f"update {PUBLISHED_REF} {merge.commit_id} {merge.local_commit}\n"
+            "prepare\ncommit\n"
+        )
+        result = self._run("update-ref", "--stdin", input_bytes=commands.encode())
+        if result.returncode != 0:
+            actual = self.head()
+            if actual != merge.local_commit:
+                raise GitPublicationConflict(merge.local_commit, actual)
+            raise GitPublicationError("Incoming reference changed before merge publication")
+
     def initial_snapshot(self) -> GitSnapshot:
         """Require the empty initialization commit before adopting a legacy project."""
         snapshot = self.snapshot()
@@ -393,7 +540,7 @@ class GitProjectRepository:
     ) -> PreparedGitPublication:
         """Prepare a complete candidate without publishing bytes or holding a lock."""
         _require_commit_id(base_commit)
-        if not message.strip() or "Basic-Memory-Transaction:" in message or "\0" in message:
+        if not message.strip() or _RESERVED_TRAILER.search(message) or "\0" in message:
             raise ValueError(
                 "Commit message must be nonempty and omit reserved transaction evidence"
             )

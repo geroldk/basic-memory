@@ -30,9 +30,7 @@ def commit(
         }
     )
     arguments = [argument for parent in parents for argument in ("-p", parent)]
-    return (
-        repository._git("commit-tree", tree, *arguments, input_bytes=b"test\n").strip().decode()
-    )
+    return repository._git("commit-tree", tree, *arguments, input_bytes=b"test\n").strip().decode()
 
 
 @pytest.fixture

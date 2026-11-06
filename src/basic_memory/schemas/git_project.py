@@ -58,6 +58,10 @@ class GitProjectManifest(BaseModel):
     def note_ids(self) -> dict[str, UUID]:
         return {note.path: note.external_id for note in self.notes}
 
+    @property
+    def note_ids_by_uuid(self) -> dict[UUID, str]:
+        return {note.external_id: note.path for note in self.notes}
+
     def canonical_json(self) -> str:
         data = self.model_dump(mode="json")
         data["notes"] = sorted(data["notes"], key=lambda note: note["path"])
