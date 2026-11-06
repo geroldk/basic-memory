@@ -40,6 +40,7 @@ async def test_bm_project_declares_sync_deletions():
         "recent",
         "status",
         "sync",
+        "merge",
     ]
     assert tool.annotations is not None
     assert tool.annotations.destructive_hint is True

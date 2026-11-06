@@ -101,6 +101,7 @@ EXPECTED_TOOL_SIGNATURES: dict[str, list[str]] = {
         "set_default",
         "workspace",
         "since",
+        "review",
         "items",
         "page",
         "page_size",

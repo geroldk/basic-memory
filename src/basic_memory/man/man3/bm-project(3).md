@@ -19,7 +19,7 @@ verified: 0.24.1 mcp
 
 ```
 bm_project(command, name=None, path=None, set_default=False, workspace=None,
-           since="7d", items=None, page=1, page_size=10,
+           since="7d", review=None, items=None, page=1, page_size=10,
            output_format="text", project=None)
 ```
 
@@ -85,6 +85,7 @@ published revisions while indexes catch up.
 - **set_default** (boolean, optional, default: False) — For create: make the new project the default.
 - **workspace** (string | null, optional, default: None) — In Cloud: the workspace slug, name or id that holds the project.
 - **since** (string, optional, default: "7d") — How far back to look: '7d', '24h', '2 days ago', 'last week', or a date. Windows shorter than one day are widened to one day.
+- **review** (string | null, optional, default: None) — For merge: the review package id.
 - **items** (array | null, optional, default: None) — What to return: notes, observations, relations, or a mix. Default: notes.
 - **page** (integer, optional, default: 1) — Page number.
 - **page_size** (integer, optional, default: 10) — Results per page (1-100).

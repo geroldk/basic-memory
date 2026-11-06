@@ -586,7 +586,7 @@ def context(
 
 @tool_app.command("project")
 def project_(
-    command: Annotated[str, typer.Argument(help="list, create, or recent")],
+    command: Annotated[str, typer.Argument(help="list, create, recent, status, sync or merge")],
     name: Annotated[Optional[str], typer.Option(help="For create: the project name")] = None,
     path: Annotated[Optional[str], typer.Option(help="For create: the project folder")] = None,
     set_default: Annotated[
@@ -594,6 +594,9 @@ def project_(
     ] = False,
     workspace: Annotated[Optional[str], typer.Option(help="Cloud workspace slug")] = None,
     since: Annotated[Optional[str], typer.Option(help="For recent: how far back")] = None,
+    review: Annotated[
+        Optional[str], typer.Option(help="For merge: the Git merge review package id")
+    ] = None,
     items: Annotated[
         Optional[list[str]], typer.Option(help="For recent: note, observation, or relation")
     ] = None,
@@ -613,6 +616,7 @@ def project_(
     bm tool project list
     bm tool project recent --since 3d
     bm tool project create --name research --path ~/research
+    bm tool project merge --project main --review <id>   # apply merge decisions (local only)
     """
     from basic_memory.mcp.tools import bm_project
 
@@ -624,6 +628,7 @@ def project_(
         set_default=set_default,
         workspace=workspace,
         since=since,
+        review=review,
         items=items,
         page=page,
         page_size=page_size,
