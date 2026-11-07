@@ -147,7 +147,8 @@ async def test_published_layout_change_converges_content_files_graph_and_vectors
         manifest = await pipeline.search_service.repository.get_entity_chunk_manifest(entity.id)
         assert manifest and all(row.embedding_status == "ready" for row in manifest)
     if operation == "delete_all":
-        assert await pipeline.search_service.repository.count() == 0
+        # Upstream dropped the exact count; an unfiltered page that is empty says the same.
+        assert await pipeline.search_service.repository.search(limit=1) == []
 
 
 @pytest.mark.asyncio
