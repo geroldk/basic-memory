@@ -532,7 +532,9 @@ The fork merges upstream instead of rebasing published history. Upstream snapsho
 BM-006 migrations are 0044 (progress), 0045 (retirement) and 0046 (graph basis),
 with exactly one Alembic head. Upstream later added its own `0044`
 (`entity_embedded_checksum`); it collided with BM-006's `0044`, so the fork carries it as
-`0047` after `0046` (released BM-006 revisions are never renumbered). Earlier experimental databases using BM-006's old
+`0047` after `0046` (released BM-006 revisions are never renumbered). Upstream's
+`0045` (`drop_frontmatter_btree_indexes`, 2026-11-05) collided the same way and is carried as
+`0048` after `0047`. Earlier experimental databases using BM-006's old
 0043–0045 numbering cannot be upgraded through this chain automatically. Use new
 disposable development databases; non-disposable databases require a separate,
 backed-up recovery operation. Never infer schema identity from a numeric revision
