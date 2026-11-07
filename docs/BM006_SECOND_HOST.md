@@ -17,7 +17,7 @@ rehearsal on a copy of the five projects does that before anything touches a rea
 1. **Install the fork at a pinned commit** (never a floating branch; automatic updates stay off):
 
    ```sh
-   uv tool install "basic-memory @ git+https://github.com/geroldk/basic-memory@<commit>" --prerelease=allow
+   uv tool install "basic-memory @ git+https://github.com/geroldk/merkwerk@<commit>" --prerelease=allow
    ```
 
    Then set `auto_update` to false in the profile before the first run.
